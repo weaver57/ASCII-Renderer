@@ -1,4 +1,4 @@
-use ascii_renderer::image_loader::load_and_resize_image;
+use ascii_renderer::image_loader::{compute_image_grid_dimensions, load_and_resize_image};
 use ascii_renderer::render::{
     AsciiRenderer, ColorMode, BLOCK_RAMP, DETAILED_RAMP, SHORT_RAMP,
 };
@@ -140,4 +140,71 @@ fn test_stress_decoder_invalid_files() {
 fn test_stress_image_loader_invalid_files() {
     let invalid_res = load_and_resize_image("nonexistent_img.png", 64, 32);
     assert!(invalid_res.is_err());
+}
+
+#[test]
+fn test_stress_grid_dimensions_fuzz_no_panic() {
+    // Sweep pathological inputs (zero dims, huge dims, tiny terminals) and
+    // assert the grid function never panics and always returns in-bounds,
+    // positive dimensions.
+    let img_dims: [(u32, u32); 6] = [
+        (0, 0),
+        (1, 1),
+        (100, 100),
+        (u32::MAX, u32::MAX),
+        (u32::MAX, 1),
+        (1, u32::MAX),
+    ];
+    for (w, h) in img_dims {
+        for tc in [1u16, 5, 80, 300, u16::MAX] {
+            for tr in [1u16, 5, 40, 200, u16::MAX] {
+                for (cw, ch) in [
+                    (None, None),
+                    (Some(0), Some(0)),
+                    (Some(usize::MAX), Some(usize::MAX)),
+                    (Some(1), Some(1)),
+                ] {
+                    let (cols, rows) =
+                        compute_image_grid_dimensions(w, h, cw, ch, tc, tr);
+                    assert!(cols >= 1 && rows >= 1, "must stay positive");
+                    assert!(cols <= tc as usize, "cols must fit terminal");
+                    assert!(rows <= tr.saturating_sub(1).max(1) as usize, "rows must fit terminal");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_real_fixture_end_to_end_many_terminal_sizes() {
+    // The checked-in 100x100 square fixture, driven through the full
+    // Phase 1 pipeline at a sweep of terminal sizes: aspect-correct grid
+    // math -> resize -> render. Every iteration must stay in bounds, produce
+    // the exact expected byte count, and emit valid UTF-8.
+    for term_cols in [40u16, 80u16, 120u16, 200u16] {
+        for term_rows in [20u16, 40u16, 60u16] {
+            let max_rows = term_rows.saturating_sub(1).max(1);
+            let (cols, rows) =
+                compute_image_grid_dimensions(100, 100, None, None, term_cols, term_rows);
+            assert!(cols >= 1 && rows >= 1, "dims must be positive");
+            assert!(cols <= term_cols as usize, "cols exceed terminal");
+            assert!(rows <= max_rows as usize, "rows exceed terminal");
+
+            let frame = load_and_resize_image("test_circle.png", cols as u32, rows as u32)
+                .expect("checked-in fixture should always load");
+            assert_eq!(frame.rgb_data.len(), cols * rows * 3, "resize must match grid exactly");
+
+            for invert in [false, true] {
+                let renderer = AsciiRenderer::new(SHORT_RAMP, ColorMode::TrueColor, invert);
+                let mut out = Vec::new();
+                renderer.render_frame(&frame.rgb_data, cols, rows, &mut out);
+                assert!(
+                    String::from_utf8(out).is_ok(),
+                    "rendered frame must be valid UTF-8 at {}x{}",
+                    cols,
+                    rows
+                );
+            }
+        }
+    }
 }

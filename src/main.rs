@@ -157,7 +157,20 @@ fn main() -> Result<()> {
     // Static Image Interactive Viewer
     if is_image_extension(&args.input) {
         let _guard = TerminalGuard::init()?;
-        let (width, height) = determine_dimensions(args.width, args.height)?;
+
+        // Read just the image header (cheap) so we can preserve aspect ratio
+        // when mapping the image onto the character grid.
+        let (img_w, img_h) = image::image_dimensions(&args.input)
+            .with_context(|| format!("Failed to read dimensions of image at {:?}", args.input))?;
+        let (term_cols, term_rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
+        let (width, height) = image_loader::compute_image_grid_dimensions(
+            img_w,
+            img_h,
+            args.width,
+            args.height,
+            term_cols,
+            term_rows,
+        );
 
         let image_frame = image_loader::load_and_resize_image(&args.input, width as u32, height as u32)?;
         let mut output_buf = Vec::with_capacity(width * height * 24);
