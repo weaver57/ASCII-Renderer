@@ -70,6 +70,59 @@ pub fn load_and_resize_image<P: AsRef<Path>>(
     })
 }
 
+/// Full-resolution decoded frame plus its dimensions. This is the source of
+/// truth for Phase 2's edge detection, which runs Sobel at full pixel
+/// resolution before aggregating into the smaller character grid (see `edge.rs`).
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGB8, `width * height * 3` bytes.
+    pub rgb_data: Vec<u8>,
+}
+
+/// Decodes an image at its full native resolution, without downsampling.
+pub fn load_rgb_frame<P: AsRef<Path>>(path: P) -> Result<Frame> {
+    let img = image::open(&path).with_context(|| format!("Failed to open image at {:?}", path.as_ref()))?;
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    Ok(Frame {
+        width: w,
+        height: h,
+        rgb_data: rgb.into_raw(),
+    })
+}
+
+/// Resizes an already-decoded full-resolution RGB frame down to `(target_width, target_height)`.
+pub fn resize_rgb_data(rgb: Vec<u8>, src_w: u32, src_h: u32, target_width: u32, target_height: u32) -> Result<Vec<u8>> {
+    let img = image::RgbImage::from_raw(src_w, src_h, rgb)
+        .context("Raw RGB data size does not match declared dimensions")?;
+    let resized = image::imageops::resize(&img, target_width, target_height, FilterType::Triangle);
+    Ok(resized.into_raw())
+}
+
+/// Returns the `[x0,x1) x [y0,y1)` source-pixel rectangle that cell `(col,row)`
+/// covers, given a source of size `(src_w, src_h)` mapped onto a grid of
+/// `(cols, rows)`.
+///
+/// Both the color/brightness downsampling **and** Phase 2's edge aggregation
+/// must iterate over *exactly* this same rectangle — duplicating this rounding
+/// logic anywhere else risks the two drifting out of sync. Never inline it.
+#[inline]
+pub fn cell_source_rect(
+    col: usize,
+    row: usize,
+    cols: usize,
+    rows: usize,
+    src_w: u32,
+    src_h: u32,
+) -> (u32, u32, u32, u32) {
+    let x0 = (col * src_w as usize / cols) as u32;
+    let x1 = (((col + 1) * src_w as usize / cols) as u32).max(x0 + 1);
+    let y0 = (row * src_h as usize / rows) as u32;
+    let y1 = (((row + 1) * src_h as usize / rows) as u32).max(y0 + 1);
+    (x0, x1, y0, y1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +193,76 @@ mod tests {
         let (cols, rows) = g(400, 300, Some(200), None, 10, 1);
         // max_rows = 0 saturating_sub(1)... -> max(1). derived gets clamped to 1.
         assert!(cols >= 1 && rows >= 1);
+    }
+
+    // --- Phase 2 refactor: cell_source_rect --------------------------------
+
+    #[test]
+    fn cell_rect_exact_grid_maps_1_to_1() {
+        // 100x100 source onto a 100x100 grid: each cell maps to exactly one pixel.
+        let (x0, x1, y0, y1) = cell_source_rect(5, 7, 100, 100, 100, 100);
+        assert_eq!((x0, x1, y0, y1), (5, 6, 7, 8));
+    }
+
+    #[test]
+    fn cell_rect_partitions_source_without_gaps_or_overlaps() {
+        let cols = 40;
+        let rows = 25;
+        // Downsizing cases (grid <= source): rects partition the source exactly.
+        for (sw, sh) in [(100u32, 480u32), (640, 480), (120, 120)] {
+            let mut total_w = 0u32;
+            for col in 0..cols {
+                let (x0, x1, _, _) = cell_source_rect(col, 0, cols, rows, sw, sh);
+                assert!(x1 > x0, "cell rect must never be empty");
+                total_w += x1 - x0;
+            }
+            assert_eq!(total_w, sw, "downsample rects must partition source width");
+            let mut total_h = 0u32;
+            for row in 0..rows {
+                let (_, _, y0, y1) = cell_source_rect(0, row, cols, rows, sw, sh);
+                assert!(y1 > y0);
+                total_h += y1 - y0;
+            }
+            assert_eq!(total_h, sh, "downsample rects must partition source height");
+        }
+
+        // Upscaling cases (grid > source): the empty-cell guard kicks in and may
+        // overlap pixels, but every cell must still be non-empty and in-bounds.
+        for sw in [1u32, 3, 40] {
+            for sh in [1u32, 3, 25] {
+                for col in 0..cols {
+                    let (x0, x1, _, _) = cell_source_rect(col, 0, cols, rows, sw, sh);
+                    assert!(x1 > x0);
+                    assert!(x1 <= sw, "cell rect must stay within source");
+                }
+                for row in 0..rows {
+                    let (_, _, y0, y1) = cell_source_rect(0, row, cols, rows, sw, sh);
+                    assert!(y1 > y0);
+                    assert!(y1 <= sh, "cell rect must stay within source");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cell_rect_never_zero_even_when_grid_exceeds_source() {
+        // Grid larger than source (upscaling case) must still yield non-empty rects.
+        let (x0, x1, _, _) = cell_source_rect(10, 0, 200, 200, 3, 3);
+        assert!(x1 > x0);
+        // x0 stays clamped by the max(x0+1) guard.
+        assert!(x1 >= 1);
+    }
+
+    #[test]
+    fn load_rgb_frame_preserves_native_dims() {
+        let path = std::path::PathBuf::from("test_circle.png");
+        if !path.exists() {
+            return; // fixture may be gitignored/absent; native-dims test is optional here
+        }
+        let f = load_rgb_frame(&path).expect("checked-in fixture should load");
+        // test_circle.png is 100x100.
+        assert_eq!(f.width, 100);
+        assert_eq!(f.height, 100);
+        assert_eq!(f.rgb_data.len(), 100 * 100 * 3);
     }
 }
