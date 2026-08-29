@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use render::{
-    AsciiRenderer, ColorMode as RenderColorMode, BLOCK_RAMP, DETAILED_RAMP, SHORT_RAMP,
+    AsciiRenderer, ColorMode as RenderColorMode, BLOCK_RAMP, DETAILED_RAMP, RAMP, SHORT_RAMP,
     compute_frame_edges,
 };
 use terminal::TerminalGuard;
@@ -39,6 +39,7 @@ pub enum RampChoice {
     Short,
     Detailed,
     Block,
+    Generated,
 }
 
 impl RampChoice {
@@ -47,6 +48,7 @@ impl RampChoice {
             RampChoice::Short => SHORT_RAMP,
             RampChoice::Detailed => DETAILED_RAMP,
             RampChoice::Block => BLOCK_RAMP,
+            RampChoice::Generated => "",
         }
     }
 
@@ -54,7 +56,8 @@ impl RampChoice {
         match self {
             RampChoice::Short => RampChoice::Detailed,
             RampChoice::Detailed => RampChoice::Block,
-            RampChoice::Block => RampChoice::Short,
+            RampChoice::Block => RampChoice::Generated,
+            RampChoice::Generated => RampChoice::Short,
         }
     }
 }
@@ -151,7 +154,10 @@ fn main() -> Result<()> {
         if let Some(c) = custom {
             c.clone()
         } else {
-            preset.as_str().to_string()
+            match preset {
+                RampChoice::Generated => RAMP.iter().collect::<String>(),
+                _ => preset.as_str().to_string(),
+            }
         }
     };
 
