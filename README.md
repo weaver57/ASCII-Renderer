@@ -89,6 +89,9 @@ ascii_renderer photo.png --color grayscale --ramp detailed --invert
 
 # Loop a video with a custom character ramp
 ascii_renderer clip.mp4 --loop-video --custom-ramp " .:|=+*#%@"
+
+# Use the data-driven perceptual ramp (16 chars, ink-density measured)
+ascii_renderer photo.png --ramp generated
 ```
 
 ---
@@ -102,7 +105,7 @@ ascii_renderer clip.mp4 --loop-video --custom-ramp " .:|=+*#%@"
 | `-H, --height <HEIGHT>`  | Output height in character rows (auto-fits the terminal).          | auto        |
 | `-f, --fps <FPS>`        | Target playback frame rate for video (max 240).                    | `30`        |
 | `-c, --color <COLOR>`    | Color mode: `truecolor`, `grayscale`, or `monochrome`.             | `truecolor` |
-| `-r, --ramp <RAMP>`      | Ramp preset: `short`, `detailed`, or `block`.                      | `short`     |
+| `-r, --ramp <RAMP>`      | Ramp preset: `short`, `detailed`, `block`, or `generated`.         | `short`     |
 | `--custom-ramp <STRING>` | Custom character ramp (brightness, darkest → lightest). Overrides `--ramp`. | —     |
 | `-i, --invert`           | Invert the brightness → character mapping.                         | off         |
 | `-l, --loop-video`       | Loop video playback continuously.                                  | off         |
@@ -126,7 +129,7 @@ Controls work live while the renderer is running.
 | `q`, `Q`, `Esc` | Quit                         |
 | `c`, `C`     | Cycle color mode (Truecolor → Grayscale → Monochrome) |
 | `i`, `I`     | Toggle invert                  |
-| `r`, `R`     | Cycle ramp preset (Short → Detailed → Block) |
+| `r`, `R`     | Cycle ramp preset (Short → Detailed → Block → Generated) |
 | `Ctrl+C`     | Quit                           |
 
 ### Video playback
@@ -182,7 +185,8 @@ ASCII/
 │   │   ├── mod.rs
 │   │   ├── ascii.rs       # AsciiRenderer: luminance → char, edge blend, ANSI buffer
 │   │   ├── edge.rs        # Sobel, NMS, hysteresis, circular-mean aggregation, dir→char
-│   │   └── luminance.rs   # Rec. 709 luminance math
+│   │   ├── luminance.rs   # Rec. 709 luminance math
+│   │   └── ramp.rs        # generated perceptual ramp (16 chars, from fontdue ink density)
 │   ├── bin/
 │   │   └── generate_ramp.rs  # offline data-driven ramp generator (fontdue)
 │   └── video/
