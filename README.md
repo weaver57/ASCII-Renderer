@@ -18,6 +18,7 @@ Usage: ascii_renderer [OPTIONS] <FILE>
 - **Perceptual luminance** (Rec. 709 coefficients) for true-to-eye brightness mapping.
 - **Aspect-ratio-correct grid sizing** — output is not vertically stretched or squashed.
 - **Area-aware downsampling** (`Triangle` filter) to avoid aliasing on fine detail.
+- **Edge-aware glyphs** — structural edges detected via full-resolution Sobel + adaptive Canny (NMS, percentile thresholds, queue hysteresis) render as correctly-oriented directional characters (`|`, `-`, `/`, `\`), falling back to brightness shading everywhere else.
 - **Buffered output** — each frame is composed into one buffer and flushed in a single write.
 - Three color modes and multiple adjustable ASCII ramps, switchable mid-run.
 
@@ -146,16 +147,21 @@ Controls work live while the renderer is running.
 
 ## How it works
 
-1. **Decode / load** — an image is decoded and resized; a video is decoded via
-   an FFmpeg subprocess streaming raw RGB frames to a pipe.
+1. **Decode / load** — an image is decoded; a video is decoded via an FFmpeg
+   subprocess streaming raw RGB frames to a pipe.
 2. **Grid sizing** — output columns/rows are computed from the terminal size and
    the source aspect ratio (`CHAR_ASPECT = 0.5`) so each character cell samples a
    proportional source region and nothing gets vertically distorted.
 3. **Downsample** — each source block is area-averaged (no nearest-neighbor
    aliasing).
-4. **Perceptual luma** — Rec. 709 luminance (`0.2126R + 0.7152G + 0.0722B`) maps
-   each cell to a ramp character.
-5. **Emit** — ANSI truecolor foreground codes + glyphs for each cell, composed
+4. **Edge detection** — Sobel runs at *full source resolution* (not the
+   downsampled grid), then Non-Maximum Suppression, adaptive percentile
+   double-thresholding, and queue-based hysteresis produce per-pixel edges. Edges
+   are aggregated into each character cell (magnitude-weighted circular mean of
+   orientation) and rendered as directional glyphs. Color stays brightness-derived.
+5. **Perceptual luma** — Rec. 709 luminance (`0.2126R + 0.7152G + 0.0722B`) maps
+   every non-edge cell to a ramp character.
+6. **Emit** — ANSI truecolor foreground codes + glyphs for each cell, composed
    into a single buffer and written with one `flush` per frame.
 
 ---
@@ -165,6 +171,8 @@ Controls work live while the renderer is running.
 ```
 ASCII/
 ├── Cargo.toml
+├── assets/
+│   └── ramp-font.ttf    # bundled permissively-licensed font for ramp generation
 ├── src/
 │   ├── main.rs            # CLI entry point & orchestration
 │   ├── lib.rs             # library root, module wiring
@@ -172,8 +180,11 @@ ASCII/
 │   ├── terminal.rs        # raw-mode / alternate-screen RAII guard
 │   ├── render/
 │   │   ├── mod.rs
-│   │   ├── ascii.rs       # AsciiRenderer: luminance → char, ANSI buffer
+│   │   ├── ascii.rs       # AsciiRenderer: luminance → char, edge blend, ANSI buffer
+│   │   ├── edge.rs        # Sobel, NMS, hysteresis, circular-mean aggregation, dir→char
 │   │   └── luminance.rs   # Rec. 709 luminance math
+│   ├── bin/
+│   │   └── generate_ramp.rs  # offline data-driven ramp generator (fontdue)
 │   └── video/
 │       ├── mod.rs
 │       └── decoder.rs     # FFmpeg subprocess → raw RGB frame reader

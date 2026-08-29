@@ -86,14 +86,24 @@ pub fn build_gradient_map(luma: &[f32], width: usize, height: usize) -> Gradient
 /// Quantize a gradient angle (radians) into one of the 4 NMS comparison bins,
 /// returning the (delta_x, delta_y) neighbor offsets to compare against.
 /// Orientation is treated as undirected (mod 180°).
+///
+/// Crucially, the neighbors must lie **along** the gradient direction, not
+/// perpendicular to it — NMS keeps the pixel that is the largest among its
+/// neighbors in the direction the edge is *rising*. A 45° gradient (rising
+/// toward the lower-right, i.e. the Sobel kernel's Gx+Gy) compares the two
+/// diagonal neighbors (1,1) and (-1,-1); a 135° gradient (-Gx+Gy) compares
+/// (1,-1) and (-1,1). Getting these swapped would compare across the edge
+/// rather than along it, which fails to thin a smeared diagonal edge (every
+/// pixel would look like a local max vs its perpendicular neighbors) — exactly
+/// what `golden_blend_diagonal_boundary_renders_slash` catches.
 #[inline]
 fn nms_bin(angle: f32) -> [(i32, i32); 2] {
     let base_deg = (angle.to_degrees()).rem_euclid(180.0);
     match base_deg {
         d if d < 22.5 || d >= 157.5 => [(-1, 0), (1, 0)],   // ~horizontal gradient
-        d if d < 67.5               => [(1, -1), (-1, 1)],  // ~45° diagonal
+        d if d < 67.5               => [(1, 1), (-1, -1)],  // ~45° diagonal
         d if d < 112.5              => [(0, -1), (0, 1)],   // ~vertical gradient
-        _                            => [(1, 1), (-1, -1)], // ~135° diagonal
+        _                            => [(1, -1), (-1, 1)], // ~135° diagonal
     }
 }
 

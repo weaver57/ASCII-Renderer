@@ -92,14 +92,6 @@ pub fn load_rgb_frame<P: AsRef<Path>>(path: P) -> Result<Frame> {
     })
 }
 
-/// Resizes an already-decoded full-resolution RGB frame down to `(target_width, target_height)`.
-pub fn resize_rgb_data(rgb: Vec<u8>, src_w: u32, src_h: u32, target_width: u32, target_height: u32) -> Result<Vec<u8>> {
-    let img = image::RgbImage::from_raw(src_w, src_h, rgb)
-        .context("Raw RGB data size does not match declared dimensions")?;
-    let resized = image::imageops::resize(&img, target_width, target_height, FilterType::Triangle);
-    Ok(resized.into_raw())
-}
-
 /// Returns the `[x0,x1) x [y0,y1)` source-pixel rectangle that cell `(col,row)`
 /// covers, given a source of size `(src_w, src_h)` mapped onto a grid of
 /// `(cols, rows)`.

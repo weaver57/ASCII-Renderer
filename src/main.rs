@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use render::{
     AsciiRenderer, ColorMode as RenderColorMode, BLOCK_RAMP, DETAILED_RAMP, SHORT_RAMP,
+    compute_frame_edges,
 };
 use terminal::TerminalGuard;
 use video::FFmpegDecoder;
@@ -177,13 +178,33 @@ fn main() -> Result<()> {
         let stdout = io::stdout();
         let mut writer = BufWriter::with_capacity(output_buf.len() + 1024, stdout.lock());
 
+        // Full-resolution source for Phase 2 edge detection. Sobel runs at the
+        // native pixel grid (not the downsampled cell grid), then the per-cell
+        // edge classifications drive the directional glyphs. Re-decoded once
+        // here; the glyph set itself is recomputed on each interactive keypress
+        // but never the convolution.
+        let full_frame = image_loader::load_rgb_frame(&args.input)?;
+        let cell_edges = compute_frame_edges(
+            &full_frame.rgb_data,
+            full_frame.width as usize,
+            full_frame.height as usize,
+            width,
+            height,
+        );
+
         let mut needs_redraw = true;
 
         loop {
             if needs_redraw {
                 let ramp_str = get_current_ramp(current_ramp_preset, &custom_ramp_opt);
                 let renderer = AsciiRenderer::new(&ramp_str, color_mode, invert);
-                renderer.render_frame(&image_frame.rgb_data, width, height, &mut output_buf);
+                renderer.render_frame_with_edges(
+                    &image_frame.rgb_data,
+                    width,
+                    height,
+                    &cell_edges,
+                    &mut output_buf,
+                );
                 writer.write_all(&output_buf)?;
                 writer.flush()?;
                 needs_redraw = false;
