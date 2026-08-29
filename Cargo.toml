@@ -7,6 +7,10 @@ edition = "2024"
 name = "generate_ramp"
 path = "src/bin/generate_ramp.rs"
 
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
