@@ -213,8 +213,27 @@ pub fn promote_edges(suppressed: &[f32], low: f32, high: f32, width: usize, heig
     final_mask
 }
 
-fn normalize_deg(v: f32, period: f32) -> f32 {
+/// Wraps `v` into `[0, period)` by Euclidean remainder.
+pub fn normalize_deg(v: f32, period: f32) -> f32 {
     v.rem_euclid(period)
+}
+
+/// Interpolates between two angles that are periodic with the given `period`
+/// (180.0 for undirected edge orientation), taking the *shortest* path around
+/// the wraparound rather than a naive linear blend.
+///
+/// `circular_lerp_deg(179.0, 2.0, 0.5, 180.0)` lands near `0.5°` (the short way
+/// across the 0°/180° boundary), not `90.5°` (the long way a naive
+/// `(179 + 2) / 2` would take). It reuses the doubled-angle-family trick used by
+/// the per-cell circular mean in `aggregate_cell_edges`, applied to interpolation:
+/// convert both angles to unit vectors on a circle scaled so the period maps to a
+/// full turn, lerp the vectors, then convert back.
+pub fn circular_lerp_deg(a_deg: f32, b_deg: f32, t: f32, period: f32) -> f32 {
+    let k = std::f32::consts::TAU / period;
+    let (ax, ay) = ((a_deg * k).cos(), (a_deg * k).sin());
+    let (bx, by) = ((b_deg * k).cos(), (b_deg * k).sin());
+    let (x, y) = (ax * (1.0 - t) + bx * t, ay * (1.0 - t) + by * t);
+    (y.atan2(x) / k).rem_euclid(period)
 }
 
 /// Aggregates the full-resolution edge mask into one `Option<EdgeCellInfo>` per
