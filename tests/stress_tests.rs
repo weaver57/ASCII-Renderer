@@ -2,7 +2,7 @@ use ascii_renderer::image_loader::{compute_image_grid_dimensions, load_and_resiz
 use ascii_renderer::render::{
     AsciiRenderer, ColorMode, BLOCK_RAMP, DETAILED_RAMP, SHORT_RAMP,
 };
-use ascii_renderer::video::FFmpegDecoder;
+use ascii_renderer::video::{FFmpegDecoder, OutputFormat};
 use std::time::Instant;
 
 #[test]
@@ -92,11 +92,25 @@ fn test_stress_color_switching_throughput() {
     let elapsed = start.elapsed();
     let fps = (iterations as f64) / elapsed.as_secs_f64();
 
+    // `cargo test` runs a debug build, which is 5-20x slower than release.
+    // Assertion: release must hold 100 FPS; debug only needs a generous floor
+    // that still catches pathological regressions (e.g. accidental O(n²) output).
+    let (threshold, label) = if cfg!(debug_assertions) {
+        (20.0, "debug")
+    } else {
+        (100.0, "release")
+    };
     println!(
-        "Rendered {} frames of {}x{} in {:?} ({:.2} FPS)",
-        iterations, width, height, elapsed, fps
+        "Rendered {} frames of {}x{} in {:?} ({:.2} FPS, {} build)",
+        iterations, width, height, elapsed, fps, label
     );
-    assert!(fps > 100.0, "Renderer must achieve at least 100 FPS (got {:.2})", fps);
+    assert!(
+        fps > threshold,
+        "Renderer must achieve at least {} FPS in a {} build (got {:.2})",
+        threshold,
+        label,
+        fps
+    );
 }
 
 #[test]
@@ -129,10 +143,10 @@ fn test_stress_all_color_modes_utf8_validity() {
 
 #[test]
 fn test_stress_decoder_invalid_files() {
-    let invalid_res = FFmpegDecoder::new("this_file_does_not_exist.mp4", 64, 32, None);
+    let invalid_res = FFmpegDecoder::new("this_file_does_not_exist.mp4", 64, 32, None, OutputFormat::Yuv420p);
     assert!(invalid_res.is_err());
 
-    let invalid_dims = FFmpegDecoder::new("Cargo.toml", 0, 0, None);
+    let invalid_dims = FFmpegDecoder::new("Cargo.toml", 0, 0, None, OutputFormat::Yuv420p);
     assert!(invalid_dims.is_err());
 }
 
