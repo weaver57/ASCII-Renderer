@@ -1,6 +1,7 @@
 mod image_loader;
 mod render;
 mod terminal;
+mod terminal_size;
 mod video;
 
 use anyhow::{Context, Result};
@@ -100,6 +101,15 @@ struct Args {
     /// Loop video playback continuously
     #[arg(short = 'l', long, default_value_t = false)]
     loop_video: bool,
+
+    /// Override terminal cell aspect ratio (width/height)
+    ///
+    /// By default, the renderer queries your terminal's actual cell dimensions
+    /// and computes the correct aspect ratio. Use this flag to force a specific
+    /// value (e.g., 0.45 for a tall-narrow font, 0.6 for a wide font).
+    /// A value of 0.5 means cells are exactly 2x taller than wide.
+    #[arg(long)]
+    char_aspect: Option<f32>,
 }
 
 fn is_image_extension(path: &std::path::Path) -> bool {
@@ -139,6 +149,11 @@ fn sanitize_fps(fps: f64) -> f64 {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Apply char aspect override before any rendering operations
+    if let Some(aspect) = args.char_aspect {
+        terminal_size::set_char_aspect_override(aspect);
+    }
 
     if !args.input.exists() {
         anyhow::bail!("Input file does not exist: {:?}", args.input);

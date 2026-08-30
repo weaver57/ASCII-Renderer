@@ -1,11 +1,7 @@
 use anyhow::{Context, Result};
+use crate::terminal_size;
 use image::imageops::FilterType;
 use std::path::Path;
-
-/// Aspect ratio of a terminal character cell: `width / height`.
-/// A monospace glyph is roughly twice as tall as it is wide (~0.5).
-/// This is the factor that prevents vertically-squashed or stretched output.
-pub const CHAR_ASPECT: f32 = 0.5;
 
 pub struct ImageFrame {
     pub rgb_data: Vec<u8>,
@@ -41,7 +37,10 @@ pub fn compute_image_grid_dimensions(
     let max_rows = (term_rows as usize).saturating_sub(1).max(1);
 
     // Source aspect expressed in *cell* units: rows per column.
-    let scale = (img_h.max(1) as f32 / img_w.max(1) as f32) * CHAR_ASPECT;
+    // Use dynamic terminal cell aspect ratio (queried from Windows Console API)
+    // so circles stay circular regardless of font/terminal settings.
+    let char_aspect = terminal_size::get_char_aspect();
+    let scale = (img_h.max(1) as f32 / img_w.max(1) as f32) * char_aspect;
 
     let mut cols = match custom_cols {
         Some(c) => c.min(max_cols).max(1),
@@ -220,6 +219,159 @@ mod tests {
         let (cols, rows) = g(400, 300, Some(200), None, 10, 1);
         // max_rows = 0 saturating_sub(1)... -> max(1). derived gets clamped to 1.
         assert!(cols >= 1 && rows >= 1);
+    }
+
+    // --- Comprehensive fit & aspect-preservation sweep --------------------
+    //
+    // These tests verify that for ANY combination of terminal size and image
+    // aspect ratio, the computed grid:
+    //   1. Always fits in the terminal (cols <= max_cols, rows <= max_rows)
+    //   2. Preserves the on-screen aspect ratio within 1 cell tolerance
+    //      (i.e., rows ≈ cols * scale ± 1)
+
+    #[test]
+    fn fits_and_preserves_aspect_sweep_square_image() {
+        // Square images at many terminal sizes
+        for term_cols in [20, 40, 60, 80, 100, 120, 160, 200, 250, 300] {
+            for term_rows in [5, 10, 15, 20, 30, 40, 50, 60, 80, 100, 120] {
+                let (cols, rows) = g(100, 100, None, None, term_cols, term_rows);
+                let max_cols = term_cols as usize;
+                let max_rows = (term_rows as usize).saturating_sub(1).max(1);
+
+                // 1. Always fits
+                assert!(cols <= max_cols,
+                    "cols {} > max_cols {} at term {}x{}", cols, max_cols, term_cols, term_rows);
+                assert!(rows <= max_rows,
+                    "rows {} > max_rows {} at term {}x{}", rows, max_rows, term_cols, term_rows);
+
+                // 2. Preserves aspect (square: scale = 0.5 -> rows ≈ cols * 0.5)
+                let expected_rows = ((cols as f32) * 0.5).round() as usize;
+                let diff = (rows as isize - expected_rows as isize).abs();
+                assert!(diff <= 1,
+                    "aspect drift: rows {} vs expected {} (diff={}) at term {}x{}, cols={}",
+                    rows, expected_rows, diff, term_cols, term_rows, cols);
+            }
+        }
+    }
+
+    #[test]
+    fn fits_and_preserves_aspect_sweep_landscape_image() {
+        // 16:9 landscape images at many terminal sizes
+        for term_cols in [20, 40, 60, 80, 100, 120, 160, 200] {
+            for term_rows in [5, 10, 15, 20, 30, 40, 50, 60, 80] {
+                let (cols, rows) = g(1920, 1080, None, None, term_cols, term_rows);
+                let max_cols = term_cols as usize;
+                let max_rows = (term_rows as usize).saturating_sub(1).max(1);
+
+                // 1. Always fits
+                assert!(cols <= max_cols,
+                    "cols {} > max_cols {} at term {}x{}", cols, max_cols, term_cols, term_rows);
+                assert!(rows <= max_rows,
+                    "rows {} > max_rows {} at term {}x{}", rows, max_rows, term_cols, term_rows);
+
+                // 2. Preserves aspect (16:9: scale = (1080/1920)*0.5 = 0.28125 -> rows ≈ cols * 0.28125)
+                let scale = (1080.0_f32 / 1920.0) * 0.5;
+                let expected_rows = ((cols as f32) * scale).round() as usize;
+                let diff = (rows as isize - expected_rows as isize).abs();
+                assert!(diff <= 1,
+                    "aspect drift: rows {} vs expected {} (diff={}) at term {}x{}, cols={}, scale={}",
+                    rows, expected_rows, diff, term_cols, term_rows, cols, scale);
+            }
+        }
+    }
+
+    #[test]
+    fn fits_and_preserves_aspect_sweep_portrait_image() {
+        // 3:4 portrait images at many terminal sizes
+        for term_cols in [20, 40, 60, 80, 100, 120] {
+            for term_rows in [10, 20, 30, 40, 50, 60, 80, 100, 150, 200] {
+                let (cols, rows) = g(900, 1200, None, None, term_cols, term_rows);
+                let max_cols = term_cols as usize;
+                let max_rows = (term_rows as usize).saturating_sub(1).max(1);
+
+                // 1. Always fits
+                assert!(cols <= max_cols,
+                    "cols {} > max_cols {} at term {}x{}", cols, max_cols, term_cols, term_rows);
+                assert!(rows <= max_rows,
+                    "rows {} > max_rows {} at term {}x{}", rows, max_rows, term_cols, term_rows);
+
+                // 2. Preserves aspect (3:4: scale = (1200/900)*0.5 = 0.666... -> rows ≈ cols * 0.666)
+                let scale = (1200.0_f32 / 900.0) * 0.5;
+                let expected_rows = ((cols as f32) * scale).round() as usize;
+                let diff = (rows as isize - expected_rows as isize).abs();
+                assert!(diff <= 1,
+                    "aspect drift: rows {} vs expected {} (diff={}) at term {}x{}, cols={}, scale={}",
+                    rows, expected_rows, diff, term_cols, term_rows, cols, scale);
+            }
+        }
+    }
+
+    #[test]
+    fn fits_and_preserves_aspect_extreme_terminals() {
+        // Very wide, very short terminals
+        let (cols, rows) = g(100, 100, None, None, 400, 5);
+        assert!(cols <= 400 && rows <= 4);
+        // With aspect 0.5 and max_rows=4, cols should be ~8
+        assert!((cols as isize - 8).abs() <= 2);
+
+        // Very tall, very narrow terminals
+        let (cols, rows) = g(100, 100, None, None, 10, 200);
+        assert!(cols <= 10 && rows <= 199);
+        // With aspect 0.5 and cols=10, rows should be ~5
+        assert!((rows as isize - 5).abs() <= 1);
+
+        // Extreme landscape on short terminal
+        let (cols, rows) = g(1920, 1080, None, None, 300, 8);
+        assert!(cols <= 300 && rows <= 7);
+        let scale = (1080.0_f32 / 1920.0) * 0.5;
+        let expected_rows = ((cols as f32) * scale).round() as usize;
+        assert!((rows as isize - expected_rows as isize).abs() <= 1);
+
+        // Extreme portrait on narrow terminal
+        let (cols, rows) = g(900, 1200, None, None, 12, 300);
+        assert!(cols <= 12 && rows <= 299);
+        let scale = (1200.0_f32 / 900.0) * 0.5;
+        let expected_rows = ((cols as f32) * scale).round() as usize;
+        assert!((rows as isize - expected_rows as isize).abs() <= 1);
+    }
+
+    #[test]
+    fn whole_image_fits_no_cropping() {
+        // This test explicitly checks that the computed grid, when used to
+        // downsample the image via cell_source_rect, covers the entire source.
+        //
+        // The logic in cell_source_rect guarantees that every source pixel is
+        // covered by at least one cell (no gaps). This test verifies the grid
+        // dimensions produced by compute_image_grid_dimensions don't cause any
+        // source dimension to exceed what the grid can represent.
+
+        for (img_w, img_h) in [(100u32, 100u32), (1920, 1080), (1080, 1920), (400, 300), (300, 400)] {
+            for term_cols in [10, 20, 40, 80, 120, 200] {
+                for term_rows in [5, 10, 20, 40, 60, 100] {
+                    let (cols, rows) = g(img_w, img_h, None, None, term_cols, term_rows);
+
+                    // The grid covers the whole image - check by iterating all cells
+                    // and verifying their union covers the full source dimensions
+                    let mut covered_w = 0u32;
+                    for col in 0..cols {
+                        let (x0, x1, _, _) = cell_source_rect(col, 0, cols, rows, img_w, img_h);
+                        covered_w = covered_w.max(x1);
+                    }
+                    assert_eq!(covered_w, img_w,
+                        "width not fully covered: {} vs {} at term {}x{}, grid {}x{}, img {}x{}",
+                        covered_w, img_w, term_cols, term_rows, cols, rows, img_w, img_h);
+
+                    let mut covered_h = 0u32;
+                    for row in 0..rows {
+                        let (_, _, y0, y1) = cell_source_rect(0, row, cols, rows, img_w, img_h);
+                        covered_h = covered_h.max(y1);
+                    }
+                    assert_eq!(covered_h, img_h,
+                        "height not fully covered: {} vs {} at term {}x{}, grid {}x{}, img {}x{}",
+                        covered_h, img_h, term_cols, term_rows, cols, rows, img_w, img_h);
+                }
+            }
+        }
     }
 
     // --- Phase 2 refactor: cell_source_rect --------------------------------

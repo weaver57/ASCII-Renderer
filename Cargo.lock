@@ -79,6 +79,7 @@ dependencies = [
  "crossterm",
  "fontdue",
  "image",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
