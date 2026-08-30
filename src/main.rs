@@ -182,11 +182,7 @@ fn main() -> Result<()> {
         );
 
         if args.debug {
-            let heuristic = terminal_size::estimate_from_terminal(term_cols, term_rows);
-            eprintln!(
-                "[DEBUG] char_aspect = {:.4} (heuristic: {:.4})",
-                char_aspect, heuristic
-            );
+            eprintln!("[DEBUG] char_aspect = {:.4}", char_aspect);
             eprintln!(
                 "[DEBUG] terminal = {} cols x {} rows",
                 term_cols, term_rows
@@ -299,11 +295,7 @@ fn main() -> Result<()> {
     );
 
     if args.debug {
-        let heuristic = terminal_size::estimate_from_terminal(term_cols, term_rows);
-        eprintln!(
-            "[DEBUG] char_aspect = {:.4} (heuristic: {:.4})",
-            char_aspect, heuristic
-        );
+        eprintln!("[DEBUG] char_aspect = {:.4}", char_aspect);
         eprintln!(
             "[DEBUG] terminal = {} cols x {} rows",
             term_cols, term_rows

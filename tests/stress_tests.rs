@@ -185,7 +185,7 @@ fn test_real_fixture_end_to_end_many_terminal_sizes() {
         for term_rows in [20u16, 40u16, 60u16] {
             let max_rows = term_rows.saturating_sub(1).max(1);
             let (cols, rows) =
-                compute_image_grid_dimensions(100, 100, None, None, term_cols, term_rows);
+                compute_image_grid_dimensions(100, 100, None, None, term_cols, term_rows, 0.5);
             assert!(cols >= 1 && rows >= 1, "dims must be positive");
             assert!(cols <= term_cols as usize, "cols exceed terminal");
             assert!(rows <= max_rows as usize, "rows exceed terminal");
