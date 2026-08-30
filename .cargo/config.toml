@@ -1,6 +1,11 @@
 [target.x86_64-pc-windows-gnu]
-linker = "C:\\msys64\\mingw64\\bin\\gcc.exe"
+# rustc invokes the linker (gcc) with the *calling shell's* PATH, not the one
+# from `[env]`. The .cmd wrapper re-establishes the MSYS2 MinGW bin dirs (gcc
+# needs collect2/ld/as; rustc needs dlltool for raw-dylib import libs) for its
+# own subprocesses, so builds work from any shell.
+linker = "C:\\Users\\Lenovo\\Documents\\PycharmProjects\\ASCII\\.cargo\\msys-linker.cmd"
 ar = "C:\\msys64\\mingw64\\bin\\ar.exe"
-
-[env]
-PATH = { value = "C:\\msys64\\mingw64\\bin;C:\\Windows\\system32;C:\\Windows", relative = false }
+# rustc spawns dlltool itself during codegen of crates that use
+# `#[link(kind = "raw-dylib")]` (windows-sys et al.). An absolute path makes
+# that independent of PATH entirely.
+rustflags = ["-C", "dlltool=C:\\msys64\\mingw64\\bin\\dlltool.exe"]
