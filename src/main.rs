@@ -168,47 +168,37 @@ fn main() -> Result<()> {
     if is_image_extension(&args.input) {
         let (img_w, img_h) = image::image_dimensions(&args.input)
             .with_context(|| format!("Failed to read dimensions of image at {:?}", args.input))?;
-        let (term_cols, term_rows) =
-            crossterm::terminal::size().context("Failed to get terminal size")?;
         let char_aspect = terminal_size::get_char_aspect();
-        let (width, height) = image_loader::compute_image_grid_dimensions(
-            img_w,
-            img_h,
-            args.width,
-            args.height,
-            term_cols,
-            term_rows,
-            char_aspect,
-        );
 
+        let _guard = TerminalGuard::init()?;
+
+        let (mut term_cols, mut term_rows) =
+            crossterm::terminal::size().context("Failed to get terminal size")?;
+        let (mut width, mut height) = image_loader::compute_image_grid_dimensions(
+            img_w, img_h, args.width, args.height, term_cols, term_rows, char_aspect,
+        );
         if args.debug {
             eprintln!("[DEBUG] char_aspect = {:.4}", char_aspect);
-            eprintln!(
-                "[DEBUG] terminal = {} cols x {} rows",
-                term_cols, term_rows
-            );
+            eprintln!("[DEBUG] terminal = {} cols x {} rows", term_cols, term_rows);
             eprintln!("[DEBUG] image = {}x{} px", img_w, img_h);
             eprintln!("[DEBUG] grid = {} cols x {} rows", width, height);
             eprintln!(
                 "[DEBUG] ramp = {:?}",
                 get_current_ramp(current_ramp_preset, &custom_ramp_opt)
-                    .chars()
-                    .collect::<Vec<_>>()
+                    .chars().collect::<Vec<_>>()
             );
             eprintln!("[DEBUG] color_mode = {:?}", color_mode);
             eprintln!("[DEBUG] invert = {}", invert);
         }
 
-        let _guard = TerminalGuard::init()?;
-
-        let image_frame =
+        let mut image_frame =
             image_loader::load_and_resize_image(&args.input, width as u32, height as u32)?;
         let mut output_buf = Vec::with_capacity(width * height * 24);
         let stdout = io::stdout();
         let mut writer = BufWriter::with_capacity(output_buf.len() + 1024, stdout.lock());
 
         let full_frame = image_loader::load_rgb_frame(&args.input)?;
-        let cell_edges = compute_frame_edges(
+        let mut cell_edges = compute_frame_edges(
             &full_frame.rgb_data,
             full_frame.width as usize,
             full_frame.height as usize,
@@ -219,6 +209,29 @@ fn main() -> Result<()> {
         let mut needs_redraw = true;
 
         loop {
+            // Detect terminal resize
+            if let Ok((new_cols, new_rows)) = crossterm::terminal::size() {
+                if new_cols != term_cols || new_rows != term_rows {
+                    term_cols = new_cols;
+                    term_rows = new_rows;
+                    let (new_w, new_h) = image_loader::compute_image_grid_dimensions(
+                        img_w, img_h, args.width, args.height,
+                        term_cols, term_rows, char_aspect,
+                    );
+                    width = new_w;
+                    height = new_h;
+                    image_frame = image_loader::load_and_resize_image(
+                        &args.input, width as u32, height as u32,
+                    )?;
+                    cell_edges = compute_frame_edges(
+                        &full_frame.rgb_data, full_frame.width as usize,
+                        full_frame.height as usize, width, height,
+                    );
+                    output_buf = Vec::with_capacity(width * height * 24);
+                    needs_redraw = true;
+                }
+            }
+
             if needs_redraw {
                 let ramp_str = get_current_ramp(current_ramp_preset, &custom_ramp_opt);
                 let renderer = AsciiRenderer::new(&ramp_str, color_mode, invert);
