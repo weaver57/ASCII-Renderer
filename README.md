@@ -40,28 +40,41 @@ Usage: ascii_renderer [OPTIONS] <FILE>
 
 ## Installation
 
-### Build from source
+### Quick install (recommended)
 
 ```sh
 git clone https://github.com/weaver57/ASCII-Renderer.git
 cd ASCII-Renderer
-
-# Release build (recommended for real-time playback performance)
-cargo build --release
-
-# The binary is written to:
-#   target/release/ascii_renderer    (Linux/macOS)
-#   target\release\ascii_renderer.exe (Windows)
+cargo install --path .
 ```
 
-Optionally add the binary to your `PATH`:
+This builds a release binary and copies it to `~/.cargo/bin/`, which is already
+on your `PATH` if you use `rustup`. After installation you can run it from
+anywhere:
 
 ```sh
-# Linux/macOS
-export PATH="$PWD/target/release:$PATH"
+ascii_renderer photo.png
+```
 
-# Windows PowerShell
-$env:PATH = "$PWD\target\release;" + $env:PATH
+To update later, pull and reinstall:
+
+```sh
+git pull
+cargo install --path .
+```
+
+### Build without installing
+
+If you prefer not to install globally, you can build and run directly:
+
+```sh
+cargo build --release
+
+# Linux/macOS
+./target/release/ascii_renderer photo.png
+
+# Windows
+.\target\release\ascii_renderer.exe photo.png
 ```
 
 ---
