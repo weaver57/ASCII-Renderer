@@ -12,7 +12,7 @@ pub struct ImageFrame {
 }
 
 /// Computes the output character-grid dimensions that preserve the image's
-/// aspect ratio on screen.
+/// aspect ratio on screen **and** fit inside the terminal.
 ///
 /// A character cell is physically taller than it is wide (`CHAR_ASPECT < 1`),
 /// so a naive "one source pixel per cell" mapping vertically distorts the
@@ -22,8 +22,13 @@ pub struct ImageFrame {
 ///
 /// * `custom_cols`/`custom_rows` — explicit CLI overrides (`--width`/`--height`).
 /// * If `custom_rows` is `None`, rows are derived from `cols` + image aspect.
-/// * Both axes are clamped to fit the terminal (`term_cols` x `term_rows`),
-///   reserving one line at the bottom for a status/clean margin.
+/// * If the derived `rows` would overflow the terminal, `cols` is **shrunk**
+///   (not `rows` merely clamped) so the whole image still fits with its aspect
+///   ratio intact. Clamping only `rows` to the terminal height while leaving
+///   `cols` at full width silently stretches the image into an oval — the
+///   classic "circle became an ellipse" bug for wide-and-short terminals.
+///
+/// One line is reserved at the bottom for a status/clean margin.
 pub fn compute_image_grid_dimensions(
     img_w: u32,
     img_h: u32,
@@ -35,7 +40,10 @@ pub fn compute_image_grid_dimensions(
     let max_cols = term_cols as usize;
     let max_rows = (term_rows as usize).saturating_sub(1).max(1);
 
-    let cols = match custom_cols {
+    // Source aspect expressed in *cell* units: rows per column.
+    let scale = (img_h.max(1) as f32 / img_w.max(1) as f32) * CHAR_ASPECT;
+
+    let mut cols = match custom_cols {
         Some(c) => c.min(max_cols).max(1),
         None => max_cols,
     };
@@ -43,9 +51,13 @@ pub fn compute_image_grid_dimensions(
     let rows = match custom_rows {
         Some(r) => r.min(max_rows).max(1),
         None => {
-            let w = img_w.max(1) as f32;
-            let h = img_h.max(1) as f32;
-            let derived = ((cols as f32) * (h / w) * CHAR_ASPECT).round() as usize;
+            // If the rows derived from the full `cols` would overflow the
+            // terminal, shrink `cols` to fit instead — preserving aspect.
+            let derived_at_full_cols = (cols as f32 * scale).round() as usize;
+            if derived_at_full_cols > max_rows {
+                cols = ((max_rows as f32) / scale).floor().max(1.0) as usize;
+            }
+            let derived = (cols as f32 * scale).round() as usize;
             derived.max(1).min(max_rows)
         }
     };
@@ -165,10 +177,33 @@ mod tests {
 
     #[test]
     fn clamps_to_terminal_bounds() {
-        // Terminal only 40x10 -> max_rows = 9. Derived rows (50) clamp to 9, cols to 40.
+        // Terminal only 40x10 -> max_rows = 9. A square image, cell aspect 0.5,
+        // needs rows = cols/2, so 9 rows only fits 18 cols. cols is SHRUNK to
+        // 18 (not left at 40) to preserve a square-on-screen — otherwise the
+        // circle becomes a wide oval. max_rows stays 9.
         let (cols, rows) = g(100, 100, None, None, 40, 10);
-        assert_eq!(cols, 40);
+        assert_eq!(cols, 18);
         assert_eq!(rows, 9);
+    }
+
+    #[test]
+    fn wide_short_terminal_shrinks_cols_to_preserve_aspect() {
+        // 120x30 terminal, square image. Full-width cols (120) would want 60
+        // rows but only 29 fit, so cols must drop to floor(29/0.5)=58, rows 29.
+        let (cols, rows) = g(100, 100, None, None, 120, 30);
+        assert_eq!(cols, 58);
+        assert_eq!(rows, 29);
+        // The on-screen physical size (cols wide, rows*2 tall) stays square.
+        assert_eq!(cols, rows * 2);
+    }
+
+    #[test]
+    fn tall_enough_terminal_keeps_full_width() {
+        // Terminal tall enough to fit full-width derived rows (120 -> 60 <= 79):
+        // no shrink needed, aspect still held.
+        let (cols, rows) = g(100, 100, None, None, 120, 80);
+        assert_eq!(cols, 120);
+        assert_eq!(rows, 60);
     }
 
     #[test]
