@@ -328,6 +328,8 @@ fn main() -> Result<()> {
         let (mut width, mut height) = image_loader::compute_image_grid_dimensions(
             img_w, img_h, args.width, args.height, term_cols, term_rows, char_aspect,
         );
+        let mut old_w = width;
+        let mut old_h = height;
         if args.debug {
             eprintln!("[DEBUG] char_aspect = {:.4}", char_aspect);
             eprintln!("[DEBUG] terminal = {} cols x {} rows", term_cols, term_rows);
@@ -369,6 +371,8 @@ fn main() -> Result<()> {
                         img_w, img_h, args.width, args.height,
                         term_cols, term_rows, char_aspect,
                     );
+                    old_w = width;
+                    old_h = height;
                     width = new_w;
                     height = new_h;
                     image_frame = image_loader::load_and_resize_image(
@@ -379,6 +383,9 @@ fn main() -> Result<()> {
                         full_frame.height as usize, width, height,
                     );
                     output_buf = Vec::with_capacity(width * height * 24);
+                    if new_w < old_w || new_h < old_h {
+                        output_buf.extend_from_slice(b"[2J[H");
+                    }
                     needs_redraw = true;
                 }
             }

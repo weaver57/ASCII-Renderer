@@ -110,8 +110,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_load_missing_file_is_default() {
-        let config = Config::load();
+    fn config_parse_no_char_aspect() {
+        let config = Config::parse("");
+        assert!(config.char_aspect.is_none());
+    }
+
+    #[test]
+    fn config_parse_garbage_ignored() {
+        let config = Config::parse("random text
+no_key
+");
         assert!(config.char_aspect.is_none());
     }
 

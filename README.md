@@ -17,9 +17,11 @@ Usage: ascii_renderer [OPTIONS] <FILE>
 - **Real-time video playback** (via FFmpeg) with pause/resume and loop.
 - **Perceptual luminance** (Rec. 709 coefficients) for true-to-eye brightness mapping.
 - **Aspect-ratio-correct grid sizing** — output is not vertically stretched or squashed.
+- **`--calibrate` mode** — interactive calibration to find your terminal's exact character aspect ratio, saved to `~/.ascii_renderer.toml`.
 - **Area-aware downsampling** (`Triangle` filter) to avoid aliasing on fine detail.
 - **Edge-aware glyphs** — structural edges detected via full-resolution Sobel + adaptive Canny (NMS, percentile thresholds, queue hysteresis) render as correctly-oriented directional characters (`|`, `-`, `/`, `\`), falling back to brightness shading everywhere else.
 - **Buffered output** — each frame is composed into one buffer and flushed in a single write.
+- **Live resize** — the grid automatically re-calibrates when you resize your terminal window.
 - Three color modes and multiple adjustable ASCII ramps, switchable mid-run.
 
 ---
@@ -109,7 +111,9 @@ ascii_renderer photo.png --ramp generated
 | `--custom-ramp <STRING>` | Custom character ramp (brightness, darkest → lightest). Overrides `--ramp`. | —     |
 | `-i, --invert`           | Invert the brightness → character mapping.                         | off         |
 | `-l, --loop-video`       | Loop video playback continuously.                                  | off         |
-| `--char-aspect <F>`      | Force the terminal cell aspect ratio (width/height). Overrides auto-detection. | auto |
+| `--char-aspect <F>`      | Force the terminal cell aspect ratio (width/height). Overrides config/auto.  | `0.5` |
+| `--calibrate`            | Interactive calibration: adjust a test circle until it looks round, then save. | off  |
+| `--debug`                | Print diagnostic info (char_aspect, grid dims) to stderr before rendering.   | off  |
 | `-h, --help`             | Print help.                                                        | —           |
 | `-V, --version`          | Print version.                                                     | —           |
 
@@ -149,17 +153,31 @@ Controls work live while the renderer is running.
 
 ---
 
+## Calibration
+
+Terminal fonts differ in character-cell proportions. The default `0.5` works for most monospace fonts, but for perfect aspect ratio:
+
+```sh
+# Run calibration once — adjust the circle until it looks round, then press Enter
+ascii_renderer --calibrate
+
+# The value is saved to ~/.ascii_renderer.toml automatically
+# Override per-run with:
+ascii_renderer photo.png --char-aspect 0.45
+```
+
+**Priority:** `--char-aspect` flag > `~/.ascii_renderer.toml` > default `0.5`
+
+---
+
 ## How it works
 
 1. **Decode / load** — an image is decoded; a video is decoded via an FFmpeg
    subprocess streaming raw RGB frames to a pipe.
 2. **Grid sizing** — output columns/rows are computed from the terminal size and
-   the source aspect ratio. On Windows the renderer measures the terminal's real
-   character-cell dimensions via `GetCurrentConsoleFontEx` and uses that measured
-   cell ratio (width/height) so every character cell samples a proportional source
-   region and nothing gets vertically stretched or squashed. It falls back to a
-   nominal `0.5` (cells ~2× taller than wide) when measurement is unavailable, and
-   `--char-aspect` overrides the result.
+   the source aspect ratio. The default cell aspect ratio is `0.5` (cells ~2× taller than wide). Run
+   `--calibrate` once to find your terminal's exact value, which is saved to
+   `~/.ascii_renderer.toml` for future renders. `--char-aspect` overrides per-run.
 3. **Downsample** — each source block is area-averaged (no nearest-neighbor
    aliasing).
 4. **Edge detection** — Sobel runs at *full source resolution* (not the
@@ -186,6 +204,7 @@ ASCII/
 │   ├── lib.rs             # library root, module wiring
 │   ├── image_loader.rs    # image loading, resize, aspect-correct grid sizing
 │   ├── terminal.rs        # raw-mode / alternate-screen RAII guard
+│   ├── config.rs          # ~/.ascii_renderer.toml read/write, calibration persistence
 │   ├── render/
 │   │   ├── mod.rs
 │   │   ├── ascii.rs       # AsciiRenderer: luminance → char, edge blend, ANSI buffer
