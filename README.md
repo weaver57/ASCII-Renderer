@@ -109,6 +109,7 @@ ascii_renderer photo.png --ramp generated
 | `--custom-ramp <STRING>` | Custom character ramp (brightness, darkest → lightest). Overrides `--ramp`. | —     |
 | `-i, --invert`           | Invert the brightness → character mapping.                         | off         |
 | `-l, --loop-video`       | Loop video playback continuously.                                  | off         |
+| `--char-aspect <F>`      | Force the terminal cell aspect ratio (width/height). Overrides auto-detection. | auto |
 | `-h, --help`             | Print help.                                                        | —           |
 | `-V, --version`          | Print version.                                                     | —           |
 
@@ -153,8 +154,12 @@ Controls work live while the renderer is running.
 1. **Decode / load** — an image is decoded; a video is decoded via an FFmpeg
    subprocess streaming raw RGB frames to a pipe.
 2. **Grid sizing** — output columns/rows are computed from the terminal size and
-   the source aspect ratio (`CHAR_ASPECT = 0.5`) so each character cell samples a
-   proportional source region and nothing gets vertically distorted.
+   the source aspect ratio. On Windows the renderer measures the terminal's real
+   character-cell dimensions via `GetCurrentConsoleFontEx` and uses that measured
+   cell ratio (width/height) so every character cell samples a proportional source
+   region and nothing gets vertically stretched or squashed. It falls back to a
+   nominal `0.5` (cells ~2× taller than wide) when measurement is unavailable, and
+   `--char-aspect` overrides the result.
 3. **Downsample** — each source block is area-averaged (no nearest-neighbor
    aliasing).
 4. **Edge detection** — Sobel runs at *full source resolution* (not the
