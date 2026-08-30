@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use crate::terminal_size;
 use image::imageops::FilterType;
 use std::path::Path;
 
@@ -32,14 +31,15 @@ pub fn compute_image_grid_dimensions(
     custom_rows: Option<usize>,
     term_cols: u16,
     term_rows: u16,
+    char_aspect: f32,
 ) -> (usize, usize) {
     let max_cols = term_cols as usize;
     let max_rows = (term_rows as usize).saturating_sub(1).max(1);
 
     // Source aspect expressed in *cell* units: rows per column.
-    // Use dynamic terminal cell aspect ratio (queried from Windows Console API)
-    // so circles stay circular regardless of font/terminal settings.
-    let char_aspect = terminal_size::get_char_aspect();
+    // char_aspect (cell width / height) comes from terminal_size::get_char_aspect()
+    // at the call site, so grid sizing never depends on a mutable global —
+    // tests pass the exact aspect they want and never touch the CLI override.
     let scale = (img_h.max(1) as f32 / img_w.max(1) as f32) * char_aspect;
 
     let mut cols = match custom_cols {
@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     fn g(img_w: u32, img_h: u32, cols: Option<usize>, rows: Option<usize>, tc: u16, tr: u16) -> (usize, usize) {
-        compute_image_grid_dimensions(img_w, img_h, cols, rows, tc, tr)
+        compute_image_grid_dimensions(img_w, img_h, cols, rows, tc, tr, 0.5)
     }
 
     #[test]

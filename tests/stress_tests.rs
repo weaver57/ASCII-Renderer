@@ -165,7 +165,7 @@ fn test_stress_grid_dimensions_fuzz_no_panic() {
                     (Some(1), Some(1)),
                 ] {
                     let (cols, rows) =
-                        compute_image_grid_dimensions(w, h, cw, ch, tc, tr);
+                        compute_image_grid_dimensions(w, h, cw, ch, tc, tr, 0.5);
                     assert!(cols >= 1 && rows >= 1, "must stay positive");
                     assert!(cols <= tc as usize, "cols must fit terminal");
                     assert!(rows <= tr.saturating_sub(1).max(1) as usize, "rows must fit terminal");

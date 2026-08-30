@@ -110,6 +110,10 @@ struct Args {
     /// A value of 0.5 means cells are exactly 2x taller than wide.
     #[arg(long)]
     char_aspect: Option<f32>,
+
+    /// Print diagnostic info to stderr before rendering
+    #[arg(long, default_value_t = false)]
+    debug: bool,
 }
 
 fn is_image_extension(path: &std::path::Path) -> bool {
@@ -121,22 +125,6 @@ fn is_image_extension(path: &std::path::Path) -> bool {
     } else {
         false
     }
-}
-
-fn determine_dimensions(
-    custom_w: Option<usize>,
-    custom_h: Option<usize>,
-) -> Result<(usize, usize)> {
-    let (term_cols, term_rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
-
-    // Reserve 1 line at the bottom for status / clean terminal margins
-    let max_w = term_cols as usize;
-    let max_h = (term_rows.saturating_sub(1)) as usize;
-
-    let w = custom_w.unwrap_or(max_w).min(max_w).max(1);
-    let h = custom_h.unwrap_or(max_h).min(max_h).max(1);
-
-    Ok((w, h))
 }
 
 fn sanitize_fps(fps: f64) -> f64 {
@@ -176,15 +164,13 @@ fn main() -> Result<()> {
         }
     };
 
-    // Static Image Interactive Viewer
+    // ── Static Image Interactive Viewer ──────────────────────────────────
     if is_image_extension(&args.input) {
-        let _guard = TerminalGuard::init()?;
-
-        // Read just the image header (cheap) so we can preserve aspect ratio
-        // when mapping the image onto the character grid.
         let (img_w, img_h) = image::image_dimensions(&args.input)
             .with_context(|| format!("Failed to read dimensions of image at {:?}", args.input))?;
-        let (term_cols, term_rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
+        let (term_cols, term_rows) =
+            crossterm::terminal::size().context("Failed to get terminal size")?;
+        let char_aspect = terminal_size::get_char_aspect();
         let (width, height) = image_loader::compute_image_grid_dimensions(
             img_w,
             img_h,
@@ -192,18 +178,39 @@ fn main() -> Result<()> {
             args.height,
             term_cols,
             term_rows,
+            char_aspect,
         );
 
-        let image_frame = image_loader::load_and_resize_image(&args.input, width as u32, height as u32)?;
+        if args.debug {
+            let heuristic = terminal_size::estimate_from_terminal(term_cols, term_rows);
+            eprintln!(
+                "[DEBUG] char_aspect = {:.4} (heuristic: {:.4})",
+                char_aspect, heuristic
+            );
+            eprintln!(
+                "[DEBUG] terminal = {} cols x {} rows",
+                term_cols, term_rows
+            );
+            eprintln!("[DEBUG] image = {}x{} px", img_w, img_h);
+            eprintln!("[DEBUG] grid = {} cols x {} rows", width, height);
+            eprintln!(
+                "[DEBUG] ramp = {:?}",
+                get_current_ramp(current_ramp_preset, &custom_ramp_opt)
+                    .chars()
+                    .collect::<Vec<_>>()
+            );
+            eprintln!("[DEBUG] color_mode = {:?}", color_mode);
+            eprintln!("[DEBUG] invert = {}", invert);
+        }
+
+        let _guard = TerminalGuard::init()?;
+
+        let image_frame =
+            image_loader::load_and_resize_image(&args.input, width as u32, height as u32)?;
         let mut output_buf = Vec::with_capacity(width * height * 24);
         let stdout = io::stdout();
         let mut writer = BufWriter::with_capacity(output_buf.len() + 1024, stdout.lock());
 
-        // Full-resolution source for Phase 2 edge detection. Sobel runs at the
-        // native pixel grid (not the downsampled cell grid), then the per-cell
-        // edge classifications drive the directional glyphs. Re-decoded once
-        // here; the glyph set itself is recomputed on each interactive keypress
-        // but never the convolution.
         let full_frame = image_loader::load_rgb_frame(&args.input)?;
         let cell_edges = compute_frame_edges(
             &full_frame.rgb_data,
@@ -234,7 +241,9 @@ fn main() -> Result<()> {
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('c')
+                        {
                             break;
                         }
                         match key.code {
@@ -265,9 +274,45 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Video Playback Loop
+    // ── Video Playback Loop ──────────────────────────────────────────────
+    let (term_cols, term_rows) =
+        crossterm::terminal::size().context("Failed to get terminal size")?;
+
+    let (src_w, src_h) = video::probe_video_dimensions(&args.input).unwrap_or_else(|| {
+        eprintln!(
+            "[ascii_renderer] warning: could not probe video dimensions for {:?}. \
+             Falling back to 16:9.",
+            args.input
+        );
+        (1920, 1080)
+    });
+
+    let char_aspect = terminal_size::get_char_aspect();
+    let (width, height) = image_loader::compute_image_grid_dimensions(
+        src_w,
+        src_h,
+        args.width,
+        args.height,
+        term_cols,
+        term_rows,
+        char_aspect,
+    );
+
+    if args.debug {
+        let heuristic = terminal_size::estimate_from_terminal(term_cols, term_rows);
+        eprintln!(
+            "[DEBUG] char_aspect = {:.4} (heuristic: {:.4})",
+            char_aspect, heuristic
+        );
+        eprintln!(
+            "[DEBUG] terminal = {} cols x {} rows",
+            term_cols, term_rows
+        );
+        eprintln!("[DEBUG] video source = {}x{}", src_w, src_h);
+        eprintln!("[DEBUG] grid = {} cols x {} rows", width, height);
+    }
+
     let _guard = TerminalGuard::init()?;
-    let (width, height) = determine_dimensions(args.width, args.height)?;
 
     let frame_duration = Duration::from_secs_f64(1.0 / target_fps);
     let mut raw_frame = vec![0u8; width * height * 3];
@@ -289,11 +334,15 @@ fn main() -> Result<()> {
             while event::poll(Duration::from_millis(0))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('c')
+                        {
                             break 'outer;
                         }
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => break 'outer,
+                            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                                break 'outer
+                            }
                             KeyCode::Char(' ') => paused = !paused,
                             KeyCode::Char('c') | KeyCode::Char('C') => {
                                 color_mode = match color_mode {
@@ -301,17 +350,20 @@ fn main() -> Result<()> {
                                     RenderColorMode::Grayscale => RenderColorMode::Monochrome,
                                     RenderColorMode::Monochrome => RenderColorMode::TrueColor,
                                 };
-                                let ramp = get_current_ramp(current_ramp_preset, &custom_ramp_opt);
+                                let ramp =
+                                    get_current_ramp(current_ramp_preset, &custom_ramp_opt);
                                 renderer = AsciiRenderer::new(&ramp, color_mode, invert);
                             }
                             KeyCode::Char('i') | KeyCode::Char('I') => {
                                 invert = !invert;
-                                let ramp = get_current_ramp(current_ramp_preset, &custom_ramp_opt);
+                                let ramp =
+                                    get_current_ramp(current_ramp_preset, &custom_ramp_opt);
                                 renderer = AsciiRenderer::new(&ramp, color_mode, invert);
                             }
                             KeyCode::Char('r') | KeyCode::Char('R') => {
                                 current_ramp_preset = current_ramp_preset.next();
-                                let ramp = get_current_ramp(current_ramp_preset, &custom_ramp_opt);
+                                let ramp =
+                                    get_current_ramp(current_ramp_preset, &custom_ramp_opt);
                                 renderer = AsciiRenderer::new(&ramp, color_mode, invert);
                             }
                             _ => {}
@@ -324,11 +376,15 @@ fn main() -> Result<()> {
                 if event::poll(Duration::from_millis(50))? {
                     if let Event::Key(key) = event::read()? {
                         if key.kind == KeyEventKind::Press {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && key.code == KeyCode::Char('c')
+                            {
                                 break 'outer;
                             }
                             match key.code {
-                                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => break 'outer,
+                                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                                    break 'outer
+                                }
                                 KeyCode::Char(' ') => paused = false,
                                 _ => {}
                             }
