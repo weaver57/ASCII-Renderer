@@ -1,11 +1,13 @@
 use std::sync::OnceLock;
 
+use crate::config;
+
 /// Hardcoded default character aspect ratio (cell width / cell height).
 ///
-/// Most monospace terminal fonts are approximately 0.5 (cells 2× taller than
-/// wide), but the exact value varies per font and terminal.  Users can
-/// override with `--char-aspect`.
-const DEFAULT_CHAR_ASPECT: f32 = 0.6;
+/// 0.5 is the industry standard — most monospace fonts are approximately
+/// 2× taller than wide.  Users can override with `--char-aspect` or
+/// by saving a calibrated value to `~/.ascii_renderer.toml`.
+const DEFAULT_CHAR_ASPECT: f32 = 0.5;
 
 static OVERRIDE: OnceLock<f32> = OnceLock::new();
 
@@ -21,14 +23,24 @@ pub fn set_char_aspect_override(aspect: f32) -> bool {
 
 /// Returns the terminal's character cell aspect ratio (width/height).
 ///
-/// Returns the CLI override if `--char-aspect` was provided, otherwise
-/// the hardcoded default.  No runtime measurement — the Windows Console
-/// API (`GetCurrentConsoleFontEx`) is notoriously unreliable across
-/// terminals and is deliberately not used.
+/// Priority order:
+/// 1. CLI `--char-aspect` override (if provided)
+/// 2. Config file `~/.ascii_renderer.toml` (if saved via `--calibrate`)
+/// 3. Hardcoded default of 0.5
 pub fn get_char_aspect() -> f32 {
+    // 1. CLI override takes highest priority
     if let Some(&override_val) = OVERRIDE.get() {
         return override_val;
     }
+
+    // 2. Config file (loaded once, cached via OnceLock)
+    static CONFIG_ASPECT: OnceLock<Option<f32>> = OnceLock::new();
+    let config_val = CONFIG_ASPECT.get_or_init(|| config::Config::load().char_aspect);
+    if let Some(val) = config_val {
+        return *val;
+    }
+
+    // 3. Hardcoded default
     DEFAULT_CHAR_ASPECT
 }
 

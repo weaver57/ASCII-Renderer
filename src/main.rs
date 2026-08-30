@@ -2,6 +2,7 @@ mod image_loader;
 mod render;
 mod terminal;
 mod terminal_size;
+mod config;
 mod video;
 
 use anyhow::{Context, Result};
@@ -114,6 +115,10 @@ struct Args {
     /// Print diagnostic info to stderr before rendering
     #[arg(long, default_value_t = false)]
     debug: bool,
+
+    /// Interactive calibration mode: shows a test circle and guides you to find your terminal's correct char_aspect
+    #[arg(long, default_value_t = false)]
+    calibrate: bool,
 }
 
 fn is_image_extension(path: &std::path::Path) -> bool {
@@ -135,12 +140,158 @@ fn sanitize_fps(fps: f64) -> f64 {
     }
 }
 
+
+/// Interactive calibration: renders a circle at varying char_aspect values
+/// so the user can visually find the one that makes it look perfectly round.
+/// Saves the chosen value to ~/.ascii_renderer.toml.
+
+fn run_calibration(_debug: bool) -> Result<()> {
+    // Use test_circle.png if available, otherwise generate one
+    let circle_path = std::path::PathBuf::from("test_circle.png");
+    let (img_w, img_h, input_path, _temp_dir);
+
+    if circle_path.exists() {
+        let dims = image::image_dimensions(&circle_path)
+            .context("Failed to read test_circle.png dimensions")?;
+        (img_w, img_h) = dims;
+        input_path = circle_path;
+        _temp_dir = None;
+    } else {
+        let dir = std::env::temp_dir().join("ascii_calibrate");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("calibrate_circle.png");
+        let size = 200u32;
+        let mut img = image::RgbImage::new(size, size);
+        let center = size as f32 / 2.0;
+        let radius = size as f32 / 2.5;
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center;
+                let dy = y as f32 - center;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist <= radius {
+                    img.put_pixel(x, y, image::Rgb([255u8, 255, 255]));
+                } else if dist <= radius + 2.0 {
+                    let t = ((radius + 2.0 - dist) / 2.0).clamp(0.0, 1.0);
+                    let v = (t * 255.0) as u8;
+                    img.put_pixel(x, y, image::Rgb([v, v, v]));
+                } else {
+                    img.put_pixel(x, y, image::Rgb([0u8, 0, 0]));
+                }
+            }
+        }
+        img.save(&path)?;
+        (img_w, img_h) = (size, size);
+        input_path = path;
+        _temp_dir = Some(dir);
+    }
+
+    let _guard = terminal::TerminalGuard::init()?;
+
+    let (term_cols, term_rows) =
+        crossterm::terminal::size().context("Failed to get terminal size")?;
+
+    let stdout = io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+
+    let mut current_aspect: f32 = 0.50;
+    let step: f32 = 0.01;
+
+    eprintln!("=== CALIBRATION MODE ===");
+    eprintln!("The circle should look perfectly round.");
+    eprintln!("LEFT/RIGHT: adjust by 0.01 | UP/DOWN: adjust by 0.05");
+    eprintln!("ENTER: save | ESC: cancel");
+    eprintln!("========================");
+
+    loop {
+        let (width, height) = image_loader::compute_image_grid_dimensions(
+            img_w, img_h, Some(term_cols as usize), None,
+            term_cols, term_rows, current_aspect,
+        );
+
+        let image_frame = image_loader::load_and_resize_image(
+            &input_path, width as u32, height as u32,
+        )?;
+
+        let full_frame = image_loader::load_rgb_frame(&input_path)?;
+        let cell_edges = render::compute_frame_edges(
+            &full_frame.rgb_data,
+            full_frame.width as usize,
+            full_frame.height as usize,
+            width,
+            height,
+        );
+
+        let mut output_buf = Vec::with_capacity(width * height * 24);
+        let renderer = render::AsciiRenderer::new(
+            render::SHORT_RAMP,
+            render::ColorMode::TrueColor,
+            false,
+        );
+        renderer.render_frame_with_edges(
+            &image_frame.rgb_data, width, height, &cell_edges, &mut output_buf,
+        );
+        writer.write_all(&output_buf)?;
+
+        let status = format!(
+            "  char_aspect = {:.2}  [grid {}x{}]  <- adjust | ENTER=save | ESC=cancel  ",
+            current_aspect, width, height
+        );
+        write!(writer, "\r\n\x1b[0m{}", status)?;
+        writer.flush()?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            return Ok(());
+                        }
+                        KeyCode::Enter => {
+                            config::Config::save_char_aspect(current_aspect)?;
+                            eprintln!("\r\n\r\nCalibration complete! Your char_aspect = {:.2} has been saved.", current_aspect);
+                            eprintln!("Future renders will use this value automatically.");
+                            eprintln!("Override anytime with: --char-aspect <value>");
+                            return Ok(());
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            current_aspect = (current_aspect - step).max(0.10);
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            current_aspect = (current_aspect + step).min(1.00);
+                        }
+                        KeyCode::Up => {
+                            current_aspect = (current_aspect + 0.05).min(1.00);
+                        }
+                        KeyCode::Down => {
+                            current_aspect = (current_aspect - 0.05).max(0.10);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
     // Apply char aspect override before any rendering operations
+    // Priority: --char-aspect flag > config file > hardcoded default
     if let Some(aspect) = args.char_aspect {
         terminal_size::set_char_aspect_override(aspect);
+    } else {
+        // Load from config file if available
+        let cfg = config::Config::load();
+        if let Some(aspect) = cfg.char_aspect {
+            terminal_size::set_char_aspect_override(aspect);
+        }
+    }
+
+    // Handle --calibrate mode (runs before any image/video rendering)
+    if args.calibrate {
+        return run_calibration(args.debug);
     }
 
     if !args.input.exists() {
