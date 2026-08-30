@@ -383,9 +383,6 @@ fn main() -> Result<()> {
                         full_frame.height as usize, width, height,
                     );
                     output_buf = Vec::with_capacity(width * height * 24);
-                    if new_w < old_w || new_h < old_h {
-                        output_buf.extend_from_slice(b"[2J[H");
-                    }
                     needs_redraw = true;
                 }
             }

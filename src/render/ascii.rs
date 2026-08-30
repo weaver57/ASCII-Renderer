@@ -124,6 +124,8 @@ impl AsciiRenderer {
         if self.color_mode != ColorMode::Monochrome {
             output.extend_from_slice(b"\x1b[0m");
         }
+        // Clear any leftover content below the grid (handles terminal shrink)
+        output.extend_from_slice(b"\x1b[0J");
     }
 
     /// Renders an RGB24 frame with Phase 2's adaptive blend: any cell with a
@@ -185,6 +187,8 @@ impl AsciiRenderer {
         if self.color_mode != ColorMode::Monochrome {
             output.extend_from_slice(b"\x1b[0m");
         }
+        // Clear any leftover content below the grid (handles terminal shrink)
+        output.extend_from_slice(b"\x1b[0J");
     }
 }
 
