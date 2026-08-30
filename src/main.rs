@@ -434,7 +434,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ── Video Playback Loop ──────────────────────────────────────────────
+    // ── Video Playback Loop (Phase 3: YUV-native pipeline) ────────────────────────────
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Ctrl+C shutdown flag
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = shutdown.clone();
+        ctrlc::set_handler(move || {
+            shutdown.store(true, Ordering::SeqCst);
+        })
+        .context("Failed to set Ctrl+C handler")?;
+    }
+
     let (term_cols, term_rows) =
         crossterm::terminal::size().context("Failed to get terminal size")?;
 
@@ -448,7 +462,7 @@ fn main() -> Result<()> {
     });
 
     let char_aspect = terminal_size::get_char_aspect();
-    let (width, height) = image_loader::compute_image_grid_dimensions(
+    let (mut width, mut height) = image_loader::compute_image_grid_dimensions(
         src_w,
         src_h,
         args.width,
@@ -470,21 +484,53 @@ fn main() -> Result<()> {
 
     let _guard = TerminalGuard::init()?;
 
-    let frame_duration = Duration::from_secs_f64(1.0 / target_fps);
-    let mut raw_frame = vec![0u8; width * height * 3];
-    let mut output_buf = Vec::with_capacity(width * height * 24);
+    let mut buffers = video::FramePipelineBuffers::new();
+    let mut smoother = render::TemporalEdgeSmoother::new(0.35);
 
     let stdout = io::stdout();
     let mut writer = BufWriter::with_capacity(128 * 1024, stdout.lock());
 
     'outer: loop {
-        let mut decoder = FFmpegDecoder::new(&args.input, width, height, Some(target_fps))?;
+        // Create YUV420P decoder for the YUV-native pipeline
+        let mut decoder = video::FFmpegDecoder::new(
+            &args.input, width, height, Some(target_fps),
+            video::OutputFormat::Yuv420p,
+        )?;
         let ramp_str = get_current_ramp(current_ramp_preset, &custom_ramp_opt);
         let mut renderer = AsciiRenderer::new(&ramp_str, color_mode, invert);
         let mut paused = false;
+        let mut clock: Option<video::PlaybackClock> = None;
+        let mut frame_count: u64 = 0;
 
-        while decoder.read_frame(&mut raw_frame)? {
-            let frame_start = Instant::now();
+        while let Some(decoded) = decoder.read_frame()? {
+            if shutdown.load(Ordering::SeqCst) {
+                break 'outer;
+            }
+
+            let pts = decoded.pts_seconds.unwrap_or_else(|| {
+                video::PlaybackClock::estimate_pts(
+                    frame_count,
+                    clock.as_ref().map_or(0.0, |c| c.avg_frame_rate() * 0.0),
+                    decoder.avg_fps(),
+                )
+            });
+            frame_count += 1;
+
+            let clock_ref = clock.get_or_insert_with(|| {
+                video::PlaybackClock::starting_now(pts, decoder.avg_fps())
+            });
+
+            // Frame pacing decision
+            let (action, sleep_dur) = clock_ref.decide(pts);
+            match action {
+                video::FrameAction::Drop => continue,
+                video::FrameAction::SleepThenRender => {
+                    if let Some(dur) = sleep_dur {
+                        std::thread::sleep(dur);
+                    }
+                }
+                video::FrameAction::RenderNow => {}
+            }
 
             // Handle keyboard controls
             while event::poll(Duration::from_millis(0))? {
@@ -549,15 +595,98 @@ fn main() -> Result<()> {
                 }
             }
 
-            renderer.render_frame(&raw_frame, width, height, &mut output_buf);
-            writer.write_all(&output_buf)?;
-            writer.flush()?;
+            // Build YUV frame from raw decoded data
+            let yuv_frame = video::create_yuv_frame(
+                &decoded.data,
+                width as u32,
+                height as u32,
+                width,        // Y stride (no padding in our FFmpeg output)
+                width / 2,    // U stride
+                width / 2,    // V stride
+                video::ColorRange::Limited,
+                video::detect_color_space(height as u32, None),
+                Some(pts),
+            );
 
-            // Frame pacing
-            let elapsed = frame_start.elapsed();
-            if elapsed < frame_duration {
-                std::thread::sleep(frame_duration - elapsed);
+            // Ensure buffers are large enough
+            buffers.ensure_capacity(
+                yuv_frame.width, yuv_frame.height, width, height,
+            );
+
+            // Build luma map directly from Y plane (no RGB conversion)
+            video::build_luma_map_y(&yuv_frame.y, &mut buffers.luma_map);
+
+            // Full-resolution edge detection (Phase 2, unchanged)
+            let edges = render::compute_frame_edges_from_luma(
+                &buffers.luma_map,
+                yuv_frame.width as usize,
+                yuv_frame.height as usize,
+                width,
+                height,
+            );
+
+            // Downsample YUV to per-cell luma + RGB color
+            let (cell_luma, cell_color) = video::downsample_yuv(&yuv_frame, width, height);
+
+            // compute_frame_edges_from_luma already returns aggregated cell edges
+            buffers.cell_edges = edges;
+
+            // Temporal smoothing
+            let smoothed = smoother.update(buffers.cell_edges.clone());
+
+            // Render to terminal
+            buffers.output_bytes.clear();
+            buffers.output_bytes.extend_from_slice(b"\x1b[H"); // cursor home
+            let mut last_color: Option<(u8, u8, u8)> = None;
+            let mut char_buf = [0u8; 4];
+
+            for row in 0..height {
+                for col in 0..width {
+                    let idx = row * width + col;
+                    let lum = cell_luma[idx];
+                    let (r, g, b) = cell_color[idx];
+
+                    let ch = match smoothed.get(idx) {
+                        Some(Some(e)) => render::direction_to_char(e.orientation_deg),
+                        _ => renderer.luminance_to_char(lum as u8),
+                    };
+
+                    match color_mode {
+                        render::ColorMode::TrueColor => {
+                            let color = (r, g, b);
+                            if last_color != Some(color) {
+                                write!(&mut buffers.output_bytes,
+                                    "\x1b[38;2;{};{};{}m", r, g, b).unwrap();
+                                last_color = Some(color);
+                            }
+                        }
+                        render::ColorMode::Grayscale => {
+                            let lum8 = render::luminance::rgb_to_luminance(r, g, b);
+                            let color = (lum8, lum8, lum8);
+                            if last_color != Some(color) {
+                                write!(&mut buffers.output_bytes,
+                                    "\x1b[38;2;{};{};{}m", lum8, lum8, lum8).unwrap();
+                                last_color = Some(color);
+                            }
+                        }
+                        render::ColorMode::Monochrome => {}
+                    }
+
+                    let encoded = ch.encode_utf8(&mut char_buf);
+                    buffers.output_bytes.extend_from_slice(encoded.as_bytes());
+                }
+                if row + 1 < height {
+                    buffers.output_bytes.extend_from_slice(b"\r\n");
+                }
             }
+
+            if color_mode != render::ColorMode::Monochrome {
+                buffers.output_bytes.extend_from_slice(b"\x1b[0m");
+            }
+            buffers.output_bytes.extend_from_slice(b"\x1b[0J"); // clear below
+
+            writer.write_all(&buffers.output_bytes)?;
+            writer.flush()?;
         }
 
         if !args.loop_video {

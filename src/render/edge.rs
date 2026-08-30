@@ -327,6 +327,25 @@ pub fn direction_to_char(orientation_deg: f32) -> char {
 
 /// Convenience: run the full Phase 2 edge pipeline for a decoded RGB frame and
 /// return one `Option<EdgeCellInfo>` per character cell (row-major, `cols*rows`).
+
+/// Edge detection from a pre-built luma map (Phase 3 YUV path).
+///
+/// Same pipeline as `compute_frame_edges` but skips the RGB->luma conversion
+/// since the Y plane is already the luma map.
+pub fn compute_frame_edges_from_luma(
+    luma: &[f32],
+    width: usize,
+    height: usize,
+    cols: usize,
+    rows: usize,
+) -> Vec<Option<EdgeCellInfo>> {
+    let grad = build_gradient_map(luma, width, height);
+    let nms = non_max_suppress(&grad);
+    let (high, low) = compute_thresholds(&nms);
+    let mask = promote_edges(&nms, low, high, width, height);
+    aggregate_cell_edges(&mask, &grad, cols, rows, width as u32, height as u32)
+}
+
 pub fn compute_frame_edges(
     rgb: &[u8],
     width: usize,
