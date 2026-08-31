@@ -1,8 +1,12 @@
+mod caps;
+mod config;
+mod diff;
+mod dither;
 mod image_loader;
+mod palette;
 mod render;
 mod terminal;
 mod terminal_size;
-mod config;
 mod video;
 
 use anyhow::{Context, Result};
@@ -490,6 +494,20 @@ fn main() -> Result<()> {
     let stdout = io::stdout();
     let mut writer = BufWriter::with_capacity(128 * 1024, stdout.lock());
 
+    // Phase 4: resolve terminal capabilities once at startup and hold the
+    // persistent emission state for the entire playback loop (D1).
+    let color_support = caps::detect_color_support();
+    let sync_output_supported = caps::query_sync_output_support();
+    let palette = match color_support {
+        caps::ColorSupport::Palette256 => palette::Palette::xterm256(),
+        caps::ColorSupport::Basic16 => palette::Palette::basic16(),
+        // TrueColor / NoColor modes ignore the palette in resolution; the value
+        // here is only used for Palette256/Basic16 anyway.
+        _ => palette::Palette::xterm256(),
+    };
+    let mut state = terminal::OutputState::new(color_support, sync_output_supported);
+    let mut grid = diff::DoubleGrid::new(width, height);
+
     'outer: loop {
         // Create YUV420P decoder for the YUV-native pipeline
         let mut decoder = video::FFmpegDecoder::new(
@@ -634,59 +652,37 @@ fn main() -> Result<()> {
             // Temporal smoothing
             let smoothed = smoother.update(buffers.cell_edges.clone());
 
-            // Render to terminal
+            // Phase 4: materialize the frame into a CharGrid, diff it against
+            // the last displayed frame, and emit only the dirty runs (diff-based
+            // emission, §4.4) with persistent color-state compression (D1).
+            {
+                let write = grid.write_buffer();
+                render::build_char_grid_into(
+                    write,
+                    &cell_luma,
+                    &cell_color,
+                    &smoothed,
+                    &renderer,
+                    color_mode,
+                );
+            } // end mutable borrow before diffing
+
+            let runs = grid.dirty_runs();
+            let mono = color_mode == render::ColorMode::Monochrome;
+
             buffers.output_bytes.clear();
-            buffers.output_bytes.extend_from_slice(b"\x1b[H"); // cursor home
-            let mut last_color: Option<(u8, u8, u8)> = None;
-            let mut char_buf = [0u8; 4];
+            terminal::emit_cells(
+                grid.write_buffer(),
+                &runs,
+                &mut state,
+                &mut buffers.output_bytes,
+                &palette,
+                mono,
+            );
 
-            for row in 0..height {
-                for col in 0..width {
-                    let idx = row * width + col;
-                    let lum = cell_luma[idx];
-                    let (r, g, b) = cell_color[idx];
-
-                    let ch = match smoothed.get(idx) {
-                        Some(Some(e)) => render::direction_to_char(e.orientation_deg),
-                        _ => renderer.luminance_to_char(lum as u8),
-                    };
-
-                    match color_mode {
-                        render::ColorMode::TrueColor => {
-                            let color = (r, g, b);
-                            if last_color != Some(color) {
-                                write!(&mut buffers.output_bytes,
-                                    "\x1b[38;2;{};{};{}m", r, g, b).unwrap();
-                                last_color = Some(color);
-                            }
-                        }
-                        render::ColorMode::Grayscale => {
-                            let lum8 = render::luminance::rgb_to_luminance(r, g, b);
-                            let color = (lum8, lum8, lum8);
-                            if last_color != Some(color) {
-                                write!(&mut buffers.output_bytes,
-                                    "\x1b[38;2;{};{};{}m", lum8, lum8, lum8).unwrap();
-                                last_color = Some(color);
-                            }
-                        }
-                        render::ColorMode::Monochrome => {}
-                    }
-
-                    let encoded = ch.encode_utf8(&mut char_buf);
-                    buffers.output_bytes.extend_from_slice(encoded.as_bytes());
-                }
-                if row + 1 < height {
-                    buffers.output_bytes.extend_from_slice(b"\r\n");
-                }
-            }
-
-            if color_mode != render::ColorMode::Monochrome {
-                buffers.output_bytes.extend_from_slice(b"\x1b[0m");
-            }
-            buffers.output_bytes.extend_from_slice(b"\x1b[0J"); // clear below
-
-            writer.write_all(&buffers.output_bytes)?;
-            writer.flush()?;
+            // Wrap in synchronized-update markers (if supported) and flush.
+            terminal::write_frame(&buffers.output_bytes, state.sync_output_supported, &mut writer)?;
+            grid.present();
         }
 
         if !args.loop_video {
