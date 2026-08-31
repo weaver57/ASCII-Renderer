@@ -4,3 +4,7 @@ pub mod terminal;
 pub mod terminal_size;
 pub mod video;
 pub mod config;
+pub mod caps;
+pub mod diff;
+pub mod dither;
+pub mod palette;
