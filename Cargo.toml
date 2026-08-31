@@ -19,5 +19,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 fontdue = "0.9"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 ctrlc = "3"
+supports-color = "3"
+libc = "0.2"
 
 [dev-dependencies]
