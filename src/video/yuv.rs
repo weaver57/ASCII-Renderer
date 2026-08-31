@@ -73,9 +73,12 @@ pub fn expand_plane_limited(plane: &mut [u8]) {
 /// height ≥ 720 → BT.709, otherwise BT.601 (same default as browsers).
 pub fn detect_color_space(height: u32, stream_color_space: Option<&str>) -> ColorSpace {
     if let Some(cs) = stream_color_space {
-        if cs.contains("bt709") || cs.contains("BT.709") || cs.contains("smpte170m") == false {
+        let lower = cs.to_ascii_lowercase();
+        if lower.contains("bt709") || lower.contains("bt.709") {
             return ColorSpace::Bt709;
         }
+        // smpte170m, bt470bg, bt470, bt601, etc. → BT.601
+        // Unrecognized strings → BT.601 (safe default for SD-era content)
         return ColorSpace::Bt601;
     }
     if height >= 720 {
@@ -415,10 +418,20 @@ mod tests {
 
     #[test]
     fn test_detect_color_space() {
+        // No stream metadata → height heuristic
         assert_eq!(detect_color_space(480, None), ColorSpace::Bt601);
         assert_eq!(detect_color_space(720, None), ColorSpace::Bt709);
         assert_eq!(detect_color_space(1080, None), ColorSpace::Bt709);
+        // Explicit BT.709 strings → BT.709
         assert_eq!(detect_color_space(480, Some("bt709")), ColorSpace::Bt709);
+        assert_eq!(detect_color_space(480, Some("BT.709")), ColorSpace::Bt709);
+        assert_eq!(detect_color_space(480, Some(" bt709 ")), ColorSpace::Bt709);
+        // BT.601-related strings → BT.601 (NOT BT.709)
+        assert_eq!(detect_color_space(1080, Some("smpte170m")), ColorSpace::Bt601);
+        assert_eq!(detect_color_space(1080, Some("bt601")), ColorSpace::Bt601);
+        assert_eq!(detect_color_space(1080, Some("bt470bg")), ColorSpace::Bt601);
+        // Unrecognized string → BT.601 (safe default)
+        assert_eq!(detect_color_space(1080, Some("unknown_cs")), ColorSpace::Bt601);
     }
 
     #[test]
