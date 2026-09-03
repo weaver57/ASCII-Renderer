@@ -13,6 +13,7 @@ pub enum OutputFormat {
 }
 
 /// A raw frame decoded by FFmpeg, with metadata.
+#[derive(Clone)]
 pub struct DecodedFrame {
     /// Raw pixel data (RGB24 or YUV420P depending on output format).
     pub data: Vec<u8>,

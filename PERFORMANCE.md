@@ -7,6 +7,22 @@
 
 ---
 
+## Executive Summary
+
+Phase 5 delivers a **1.58× end-to-end throughput speedup** over the scalar
+Phase 1–4 baseline on the representative test video (640×640 source, 160×90
+grid, sustained over 300 frames).  The speedup comes from three optimizations:
+
+- **Sobel kernel**: SIMD (`wide::f32x8`) gives a **4.92×** speedup (102.7 ms → 20.9 ms at 1080p).
+- **NMS kernel**: Rayon row-sharding gives a **2.36×** speedup (6.4 ms → 2.7 ms at 1080p).
+- **Box-filter downsample**: Rayon row-sharding gives a **3.57×** speedup (3.1 ms → 0.9 ms at 1080p).
+
+The pipeline's thread topology (Decode/Process/Render) and buffer pool provide
+the architectural foundation; the Sobel SIMD is the single largest contributor
+to the measured speedup.
+
+---
+
 ## 1. Executive Summary & Confirmation of Governing Hypotheses
 
 Per the Phase 5 Architecture Plan (§0, D1), profiling the actual Phase 1–4 pipeline before introducing any threading or SIMD code was mandatory to validate our optimization priorities:

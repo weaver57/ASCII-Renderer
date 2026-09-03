@@ -21,7 +21,7 @@ use crate::palette::Palette;
 use crate::pool::{BufferPool, PoolGuard};
 use crate::parallel::{
     build_gradient_map_simd, downsample_yuv_planes_parallel, init_thread_pool,
-    non_max_suppress_simd,
+    non_max_suppress_parallel,
 };
 use crate::render::ascii::ColorMode as RenderColorMode;
 use crate::render::edge::{aggregate_cell_edges, compute_thresholds, promote_edges, EdgeCellInfo};
@@ -104,6 +104,12 @@ pub struct PipelineConfig {
     pub output_pool_capacity: usize,
     pub channel_capacity: usize,
     pub drop_threshold: Duration,
+    /// When `true` (the default), the pipeline paces to the source frame rate:
+    /// the Render thread sleeps until each frame's `target_instant` and the
+    /// Process thread drops frames that fall hopelessly behind (D4). Set to
+    /// `false` for throughput benchmarking so the pipeline runs every frame at
+    /// maximum speed with no pacing and no dropping.
+    pub pacing: bool,
 }
 
 impl Default for PipelineConfig {
@@ -119,6 +125,7 @@ impl Default for PipelineConfig {
             output_pool_capacity: 4,
             channel_capacity: 2,
             drop_threshold: Duration::from_millis(100),
+            pacing: true,
         }
     }
 }
@@ -230,7 +237,7 @@ pub fn process_frame(
     // see parallel.rs). Sobel additionally uses SIMD (`wide::f32x8`). Hysteresis
     // promotion remains the single-threaded O(N) queue traversal from Phase 2 (D7).
     let gradient = build_gradient_map_simd(&state.luma_map, src_w, src_h);
-    let nms_magnitude = non_max_suppress_simd(&gradient);
+    let nms_magnitude = non_max_suppress_parallel(&gradient);
     let (high, low) = compute_thresholds(&nms_magnitude);
     let mask = promote_edges(&nms_magnitude, low, high, src_w, src_h);
     state.cell_edges = aggregate_cell_edges(
@@ -344,10 +351,17 @@ pub fn run_pipeline_with_decoder_and_writer<D: VideoDecoder + Send + 'static, W:
                     });
                     frame_count += 1;
 
-                    let clock_ref = clock.get_or_insert_with(|| {
-                        PlaybackClock::starting_now(pts, decoder.avg_fps())
-                    });
-                    let target_instant = clock_ref.target_instant(pts);
+                    let target_instant = if decode_config.pacing {
+                        let clock_ref = clock.get_or_insert_with(|| {
+                            PlaybackClock::starting_now(pts, decoder.avg_fps())
+                        });
+                        clock_ref.target_instant(pts)
+                    } else {
+                        // Throughput mode: every frame is "due now", so the
+                        // Process thread never drops it and the Render thread
+                        // never sleeps. Measures raw compute throughput.
+                        Instant::now()
+                    };
 
                     let mut guard = decode_yuv_pool.acquire();
                     let width = decode_config.cols;
@@ -415,9 +429,11 @@ pub fn run_pipeline_with_decoder_and_writer<D: VideoDecoder + Send + 'static, W:
                     let yuv_guard = PoolGuard::wrap(yuv_buffers, process_yuv_pool.free_sender());
 
                     // Dual-point drop policy (D4, first check): drop late frames before expensive compute
-                    let now = Instant::now();
-                    if now > yuv_guard.target_instant + process_config.drop_threshold {
-                        continue; // yuv_guard dropped here -> auto-returned to yuv_pool
+                    if process_config.pacing {
+                        let now = Instant::now();
+                        if now > yuv_guard.target_instant + process_config.drop_threshold {
+                            continue; // yuv_guard dropped here -> auto-returned to yuv_pool
+                        }
                     }
 
                     let mut out_guard = process_output_pool.acquire();
@@ -439,6 +455,7 @@ pub fn run_pipeline_with_decoder_and_writer<D: VideoDecoder + Send + 'static, W:
     // ── 3. Render Thread ────────────────────────────────────────────────────────
     let render_shutdown = Arc::clone(&shutdown);
     let render_output_pool = Arc::clone(&output_pool);
+    let render_config = config.clone();
     let sync_output_supported = caps::query_sync_output_support();
 
     let render_handle = std::thread::spawn(move || -> Result<()> {
@@ -455,18 +472,20 @@ pub fn run_pipeline_with_decoder_and_writer<D: VideoDecoder + Send + 'static, W:
                         PoolGuard::wrap(output_buf, render_output_pool.free_sender());
 
                     // Dual-point drop policy (D4, second check): sleep until target presentation time
-                    let now = Instant::now();
-                    if now < out_guard.target_instant {
-                        let sleep_dur = out_guard.target_instant - now;
-                        let step = Duration::from_millis(5);
-                        let mut remaining = sleep_dur;
-                        while remaining > Duration::ZERO {
-                            if render_shutdown.load(Ordering::Relaxed) {
-                                break;
+                    if render_config.pacing {
+                        let now = Instant::now();
+                        if now < out_guard.target_instant {
+                            let sleep_dur = out_guard.target_instant - now;
+                            let step = Duration::from_millis(5);
+                            let mut remaining = sleep_dur;
+                            while remaining > Duration::ZERO {
+                                if render_shutdown.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let s = remaining.min(step);
+                                std::thread::sleep(s);
+                                remaining = remaining.saturating_sub(s);
                             }
-                            let s = remaining.min(step);
-                            std::thread::sleep(s);
-                            remaining = remaining.saturating_sub(s);
                         }
                     }
 
