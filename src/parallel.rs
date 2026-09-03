@@ -7,9 +7,13 @@
 //!   while writing disjoint, non-overlapping slices partitioned by `par_chunks_mut`.
 
 use rayon::prelude::*;
+use wide::f32x8;
 
 use crate::render::edge::{nms_bin, GradientMap};
 use crate::video::yuv::{yuv_to_rgb, ColorSpace};
+
+/// SIMD lane count used throughout Phase 5 (§4.8).
+const LANES: usize = 8;
 
 /// Number of source rows per Rayon band for Sobel/NMS sharding.
 ///
@@ -186,6 +190,156 @@ pub fn build_gradient_map_parallel(luma: &[f32], width: usize, height: usize) ->
     }
 }
 
+/// Loads a 3-row × 10-element window centered at column `cx` with boundary clamping.
+///
+/// Returns three rows of 10 `f32` values each. This is the minimum needed for
+/// 8 SIMD-processed pixels starting at `cx`: the 3×3 Sobel kernel requires one
+/// column of context on each side, and the `wide::f32x8` lane width demands 8
+/// elements plus the 2 boundary columns.
+#[inline]
+fn load_sobel_3x10(luma: &[f32], w: usize, h: usize, cx: usize, cy: usize) -> [[f32; 10]; 3] {
+    let mut rows = [[0.0f32; 10]; 3];
+    for ky in 0..3i32 {
+        let sy = (cy as i32 + ky - 1).clamp(0, h as i32 - 1) as usize;
+        for kx in 0..10i32 {
+            let sx = (cx as i32 + kx - 1).clamp(0, w as i32 - 1) as usize;
+            rows[ky as usize][kx as usize] = luma[sy * w + sx];
+        }
+    }
+    rows
+}
+
+/// Processes a single row band with SIMD-accelerated Sobel convolution.
+///
+/// `luma` is the full-resolution luma map (absolute indexing).
+/// `magnitude` / `angle` are band-local slices from `par_chunks_mut`
+/// (relative indexing: row 0 of the band = index 0).
+/// `band_rows` is the number of rows in this band.
+/// `abs_row_start` is the absolute y-coordinate of the band's first row in the
+/// full image — needed for `luma` lookups and boundary clamping.
+fn build_gradient_map_simd_band(
+    luma: &[f32],
+    magnitude: &mut [f32],
+    angle: &mut [f32],
+    w: usize,
+    h: usize,
+    band_rows: usize,
+    abs_row_start: usize,
+) {
+    const GX_ROW: [[f32; 3]; 3] = [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]];
+    const GY_ROW: [[f32; 3]; 3] = [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]];
+
+    for band_y in 0..band_rows {
+        let abs_y = abs_row_start + band_y;
+        let row_off = band_y * w; // relative to band slice
+        let mut x = 0;
+
+        // SIMD loop: process 8 pixels at a time
+        while x + 8 <= w {
+            let mut gx_acc = f32x8::ZERO;
+            let mut gy_acc = f32x8::ZERO;
+
+            for ky in 0..3 {
+                let win = load_sobel_3x10(luma, w, h, x, abs_y);
+                // Left neighbors (indices 0..8), center (indices 1..9),
+                // right neighbors (indices 2..10)
+                let left_vals = f32x8::new([
+                    win[ky][0], win[ky][1], win[ky][2], win[ky][3],
+                    win[ky][4], win[ky][5], win[ky][6], win[ky][7],
+                ]);
+                let center_vals = f32x8::new([
+                    win[ky][1], win[ky][2], win[ky][3], win[ky][4],
+                    win[ky][5], win[ky][6], win[ky][7], win[ky][8],
+                ]);
+                let right_vals = f32x8::new([
+                    win[ky][2], win[ky][3], win[ky][4], win[ky][5],
+                    win[ky][6], win[ky][7], win[ky][8], win[ky][9],
+                ]);
+
+                // Gx[ky] = left * GX[ky][0] + center * GX[ky][1] + right * GX[ky][2]
+                // (GX[ky][1] is always 0, but keep the term for symmetry.)
+                gx_acc += left_vals * f32x8::new([GX_ROW[ky][0]; 8])
+                    + center_vals * f32x8::new([GX_ROW[ky][1]; 8])
+                    + right_vals * f32x8::new([GX_ROW[ky][2]; 8]);
+
+                // Gy[ky] = left * GY[ky][0] + center * GY[ky][1] + right * GY[ky][2]
+                gy_acc += left_vals * f32x8::new([GY_ROW[ky][0]; 8])
+                    + center_vals * f32x8::new([GY_ROW[ky][1]; 8])
+                    + right_vals * f32x8::new([GY_ROW[ky][2]; 8]);
+            }
+
+            // magnitude = sqrt(gx² + gy²)
+            let mag = (gx_acc * gx_acc + gy_acc * gy_acc).sqrt();
+            let mag_arr: [f32; 8] = mag.into();
+            for i in 0..8 {
+                magnitude[row_off + x + i] = mag_arr[i];
+            }
+
+            // Angle: scalar atan2 loop (wide has no portable atan2)
+            let gx_arr: [f32; 8] = gx_acc.into();
+            let gy_arr: [f32; 8] = gy_acc.into();
+            for i in 0..8 {
+                angle[row_off + x + i] = gy_arr[i].atan2(gx_arr[i]);
+            }
+
+            x += 8;
+        }
+
+        // Scalar tail for remaining columns
+        for xv in x..w {
+            let mut gx = 0.0f32;
+            let mut gy = 0.0f32;
+            let win = load_sobel_3x10(luma, w, h, xv, abs_y);
+            for ky in 0..3 {
+                gx += GX_ROW[ky][0] * win[ky][0] + GX_ROW[ky][1] * win[ky][1] + GX_ROW[ky][2] * win[ky][2];
+                gy += GY_ROW[ky][0] * win[ky][0] + GY_ROW[ky][1] * win[ky][1] + GY_ROW[ky][2] * win[ky][2];
+            }
+            magnitude[row_off + xv] = (gx * gx + gy * gy).sqrt();
+            angle[row_off + xv] = gy.atan2(gx);
+        }
+    }
+}
+
+/// SIMD-accelerated Sobel gradient computation (§4.9).
+///
+/// Row-band-sharded using Rayon, with SIMD (`wide::f32x8`) processing 8 pixels
+/// per iteration within each band. The scalar tail handles widths that are not
+/// multiples of 8.
+///
+/// Bit-exact with both the scalar [`build_gradient_map`] and the non-SIMD
+/// parallel [`build_gradient_map_parallel`], verified in `tests/simd_tests.rs`.
+pub fn build_gradient_map_simd(luma: &[f32], width: usize, height: usize) -> GradientMap {
+    let mut magnitude = vec![0.0f32; luma.len()];
+    let mut angle = vec![0.0f32; luma.len()];
+
+    let band_px = BAND_ROWS * width;
+
+    magnitude
+        .par_chunks_mut(band_px)
+        .zip(angle.par_chunks_mut(band_px))
+        .enumerate()
+        .for_each(|(band_idx, (mag_band, ang_band))| {
+            let abs_row_start = band_idx * BAND_ROWS;
+            let band_rows = (abs_row_start + BAND_ROWS).min(height) - abs_row_start;
+            build_gradient_map_simd_band(
+                luma,
+                mag_band,
+                ang_band,
+                width,
+                height,
+                band_rows,
+                abs_row_start,
+            );
+        });
+
+    GradientMap {
+        width: width as u32,
+        height: height as u32,
+        magnitude,
+        angle,
+    }
+}
+
 /// Rayon row-band-sharded Non-Maximum Suppression.
 ///
 /// Reads the now-complete `gradient` (magnitude + angle) and writes the
@@ -228,4 +382,116 @@ pub fn non_max_suppress_parallel(gradient: &GradientMap) -> Vec<f32> {
         });
 
     out
+}
+
+// ---------------------------------------------------------------------------
+// §4.8 — SIMD box-filter / luma summation helpers
+// ---------------------------------------------------------------------------
+
+/// Sum a slice of `u8` bytes into `f32` using `wide::f32x8` SIMD lanes, with a
+/// scalar tail for the remainder.
+///
+/// The scalar remainder calls plain `f32` addition — the *same* operation the
+/// Phase 1 scalar box-filter already does, not a second hand-written
+/// "mostly the same" implementation.  This is the general pattern for every
+/// SIMD kernel in Phase 5 (§4.8 of the plan).
+#[inline]
+fn sum_row_simd(pixels: &[u8]) -> f32 {
+    let mut acc = f32x8::ZERO;
+    let mut chunks = pixels.chunks_exact(8);
+    for chunk in &mut chunks {
+        acc += f32x8::new([
+            chunk[0] as f32, chunk[1] as f32, chunk[2] as f32, chunk[3] as f32,
+            chunk[4] as f32, chunk[5] as f32, chunk[6] as f32, chunk[7] as f32,
+        ]);
+    }
+    let mut total: f32 = acc.reduce_add();
+    for &px in chunks.remainder() {
+        total += px as f32;
+    }
+    total
+}
+
+/// SIMD-accelerated box-filter downsampling of raw YUV planes into per-cell
+/// luma and RGB colors.
+///
+/// Identical algorithm to [`downsample_yuv_planes`] but uses `sum_row_simd`
+/// (§4.8) for the per-row summation within each cell's source rectangle.
+/// The remainder-tail calls plain scalar addition — the exact scalar path.
+///
+/// Differential tested against both the scalar [`downsample_yuv_planes`] and
+/// the non-SIMD parallel [`downsample_yuv_planes_parallel`] in
+/// `tests/simd_tests.rs`.
+pub fn downsample_yuv_planes_simd(
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    src_w: usize,
+    src_h: usize,
+    color_space: ColorSpace,
+    cols: usize,
+    rows: usize,
+    cell_luma: &mut [f32],
+    cell_color: &mut [(u8, u8, u8)],
+) {
+    if cols == 0 || rows == 0 || src_w == 0 || src_h == 0 {
+        return;
+    }
+    debug_assert!(cell_luma.len() >= cols * rows);
+    debug_assert!(cell_color.len() >= cols * rows);
+
+    let luma_target = &mut cell_luma[..cols * rows];
+    let color_target = &mut cell_color[..cols * rows];
+
+    luma_target
+        .par_chunks_mut(cols)
+        .zip(color_target.par_chunks_mut(cols))
+        .enumerate()
+        .for_each(|(row, (luma_row, color_row))| {
+            for col in 0..cols {
+                let x0 = col * src_w / cols;
+                let x1 = ((col + 1) * src_w / cols).max(x0 + 1);
+                let y0 = row * src_h / rows;
+                let y1 = ((row + 1) * src_h / rows).max(y0 + 1);
+
+                let cx0 = x0 / 2;
+                let cx1 = (x1 + 1) / 2;
+                let cy0 = y0 / 2;
+                let cy1 = (y1 + 1) / 2;
+
+                // SIMD-accelerated Y summation over the luma rect
+                let mut y_acc = 0.0f32;
+                let mut y_count = 0u32;
+                for py in y0..y1 {
+                    y_acc += sum_row_simd(&y_plane[py * src_w + x0..py * src_w + x1]);
+                    y_count += (x1 - x0) as u32;
+                }
+                let avg_y = if y_count > 0 {
+                    y_acc / y_count as f32
+                } else {
+                    0.0
+                };
+
+                // Chroma — same scalar fallback (very few elements per cell)
+                let chroma_src_w = (src_w / 2).max(1);
+                let mut u_acc = 0.0f32;
+                let mut v_acc = 0.0f32;
+                let mut c_count = 0u32;
+                for py in cy0..cy1.min(src_h / 2) {
+                    for px in cx0..cx1.min(src_w / 2) {
+                        u_acc += u_plane[py * chroma_src_w + px] as f32;
+                        v_acc += v_plane[py * chroma_src_w + px] as f32;
+                        c_count += 1;
+                    }
+                }
+                let (avg_u, avg_v) = if c_count > 0 {
+                    (u_acc / c_count as f32, v_acc / c_count as f32)
+                } else {
+                    (128.0, 128.0)
+                };
+
+                luma_row[col] = avg_y;
+                color_row[col] = yuv_to_rgb(avg_y, avg_u, avg_v, color_space);
+            }
+        });
 }

@@ -20,7 +20,7 @@ use crate::diff::DoubleGrid;
 use crate::palette::Palette;
 use crate::pool::{BufferPool, PoolGuard};
 use crate::parallel::{
-    build_gradient_map_parallel, downsample_yuv_planes_parallel, init_thread_pool,
+    build_gradient_map_simd, downsample_yuv_planes_parallel, init_thread_pool,
     non_max_suppress_parallel,
 };
 use crate::render::ascii::ColorMode as RenderColorMode;
@@ -227,9 +227,9 @@ pub fn process_frame(
     // 2. Full-resolution edge detection (Sobel + NMS + Hysteresis + Aggregation)
     //
     // Sobel and NMS are rayon row-band-sharded (shared-read / disjoint-write,
-    // see parallel.rs). Hysteresis promotion remains the single-threaded O(N)
-    // queue traversal from Phase 2 (D7).
-    let gradient = build_gradient_map_parallel(&state.luma_map, src_w, src_h);
+    // see parallel.rs). Sobel additionally uses SIMD (`wide::f32x8`). Hysteresis
+    // promotion remains the single-threaded O(N) queue traversal from Phase 2 (D7).
+    let gradient = build_gradient_map_simd(&state.luma_map, src_w, src_h);
     let nms_magnitude = non_max_suppress_parallel(&gradient);
     let (high, low) = compute_thresholds(&nms_magnitude);
     let mask = promote_edges(&nms_magnitude, low, high, src_w, src_h);
