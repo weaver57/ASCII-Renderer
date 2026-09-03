@@ -96,8 +96,11 @@ pub fn build_gradient_map(luma: &[f32], width: usize, height: usize) -> Gradient
 /// rather than along it, which fails to thin a smeared diagonal edge (every
 /// pixel would look like a local max vs its perpendicular neighbors) — exactly
 /// what `golden_blend_diagonal_boundary_renders_slash` catches.
+///
+/// `pub(crate)` so the Rayon-sharded NMS in `crate::parallel` shares this exact
+/// quantization table (guaranteeing parity with the scalar kernel).
 #[inline]
-fn nms_bin(angle: f32) -> [(i32, i32); 2] {
+pub(crate) fn nms_bin(angle: f32) -> [(i32, i32); 2] {
     let base_deg = (angle.to_degrees()).rem_euclid(180.0);
     match base_deg {
         d if d < 22.5 || d >= 157.5 => [(-1, 0), (1, 0)],   // ~horizontal gradient

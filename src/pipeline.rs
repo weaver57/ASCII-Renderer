@@ -19,15 +19,18 @@ use crate::caps::{self, ColorSupport};
 use crate::diff::DoubleGrid;
 use crate::palette::Palette;
 use crate::pool::{BufferPool, PoolGuard};
+use crate::parallel::{
+    build_gradient_map_parallel, downsample_yuv_planes_parallel, init_thread_pool,
+    non_max_suppress_parallel,
+};
 use crate::render::ascii::ColorMode as RenderColorMode;
-use crate::render::edge::{compute_frame_edges_from_luma, EdgeCellInfo};
+use crate::render::edge::{aggregate_cell_edges, compute_thresholds, promote_edges, EdgeCellInfo};
 use crate::render::grid::build_char_grid_into;
 use crate::render::temporal::TemporalEdgeSmoother;
 use crate::render::AsciiRenderer;
 use crate::terminal::{self, OutputState};
 use crate::video::clock::PlaybackClock;
 use crate::video::decoder::{FFmpegDecoder, OutputFormat, VideoDecoder};
-use crate::parallel::{downsample_yuv_planes_parallel, init_thread_pool};
 use crate::video::yuv::{build_luma_map_y, detect_color_space, ColorRange, ColorSpace};
 
 /// Pre-allocated buffer holding raw YUV planes and frame metadata across the Decode -> Process channel.
@@ -222,14 +225,22 @@ pub fn process_frame(
     build_luma_map_y(&yuv.y, &mut state.luma_map);
 
     // 2. Full-resolution edge detection (Sobel + NMS + Hysteresis + Aggregation)
-    let edges = compute_frame_edges_from_luma(
-        &state.luma_map,
-        src_w,
-        src_h,
+    //
+    // Sobel and NMS are rayon row-band-sharded (shared-read / disjoint-write,
+    // see parallel.rs). Hysteresis promotion remains the single-threaded O(N)
+    // queue traversal from Phase 2 (D7).
+    let gradient = build_gradient_map_parallel(&state.luma_map, src_w, src_h);
+    let nms_magnitude = non_max_suppress_parallel(&gradient);
+    let (high, low) = compute_thresholds(&nms_magnitude);
+    let mask = promote_edges(&nms_magnitude, low, high, src_w, src_h);
+    state.cell_edges = aggregate_cell_edges(
+        &mask,
+        &gradient,
         state.cols,
         state.rows,
+        src_w as u32,
+        src_h as u32,
     );
-    state.cell_edges = edges;
 
     // 3. Temporal edge smoothing
     let smoothed = state.smoother.update(state.cell_edges.clone());
