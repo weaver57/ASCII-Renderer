@@ -11,6 +11,7 @@ use wide::f32x8;
 
 use crate::render::edge::{nms_bin, GradientMap};
 use crate::video::yuv::{yuv_to_rgb, ColorSpace};
+use wide::{CmpGe, CmpGt};
 
 /// SIMD lane count used throughout Phase 5 (§4.8).
 const LANES: usize = 8;
@@ -377,6 +378,185 @@ pub fn non_max_suppress_parallel(gradient: &GradientMap) -> Vec<f32> {
                     if mag > gradient.magnitude[na] && mag >= gradient.magnitude[nb] {
                         band[row_off + x as usize] = mag;
                     }
+                }
+            }
+        });
+
+    out
+}
+
+/// Returns the 0..4 direction-bin index for an angle, matching the arms of
+/// [`nms_bin`](crate::render::edge::nms_bin) exactly. Used to build the
+/// per-lane SIMD selection masks in `non_max_suppress_simd`.
+#[inline]
+fn nms_bin_index(angle: f32) -> usize {
+    let base_deg = (angle.to_degrees()).rem_euclid(180.0);
+    if base_deg < 22.5 || base_deg >= 157.5 {
+        0 // ~horizontal gradient: [(-1,0),(1,0)]
+    } else if base_deg < 67.5 {
+        1 // ~45° diagonal: [(1,1),(-1,-1)]
+    } else if base_deg < 112.5 {
+        2 // ~vertical gradient: [(0,-1),(0,1)]
+    } else {
+        3 // ~135° diagonal: [(1,-1),(-1,1)]
+    }
+}
+
+/// Loads 8 contiguous `f32` values from `slice` starting at `start`.
+#[inline]
+fn load8(slice: &[f32], start: usize) -> f32x8 {
+    f32x8::new([
+        slice[start],
+        slice[start + 1],
+        slice[start + 2],
+        slice[start + 3],
+        slice[start + 4],
+        slice[start + 5],
+        slice[start + 6],
+        slice[start + 7],
+    ])
+}
+
+/// Scalar NMS evaluation for one pixel at (x, y), identical to the Phase 2
+/// reference. Writes into the band-local `out` at `row_off + x`. Used for
+/// boundary rows, boundary columns, and the non-multiple-of-8 tail.
+#[inline]
+fn nms_scalar_pixel(
+    gradient: &GradientMap,
+    w: i32,
+    h: i32,
+    x: i32,
+    y: i32,
+    out: &mut [f32],
+    row_off: usize,
+) {
+    let idx = (y * w + x) as usize;
+    let mag = gradient.magnitude[idx];
+    if mag == 0.0 {
+        return;
+    }
+    let [a, b] = nms_bin(gradient.angle[idx]);
+    let na = ((y + a.1).clamp(0, h - 1) * w + (x + a.0).clamp(0, w - 1)) as usize;
+    let nb = ((y + b.1).clamp(0, h - 1) * w + (x + b.0).clamp(0, w - 1)) as usize;
+    if mag > gradient.magnitude[na] && mag >= gradient.magnitude[nb] {
+        out[row_off + x as usize] = mag;
+    }
+}
+
+/// SIMD NMS evaluation for 8 consecutive interior pixels in row `y` starting at
+/// column `s`.
+///
+/// The four-way direction branch of the scalar kernel becomes a per-lane SIMD
+/// *select*: for each of the 4 bins we load the two direction-selected neighbor
+/// lanes as shifted contiguous windows (the same shape as the Sobel kernel in
+/// §4.9), then sum them against per-lane 0/1 masks that pick the correct bin.
+/// The asymmetric `>` / `>=` compare is then a single SIMD compare, and the
+/// output is written via a mask `blend`.
+///
+/// Precondition: `s >= 1`, `s + 8 <= w - 1`, and `1 <= y <= h - 2` — i.e. the
+/// 8-pixel block plus every reachable 3×3 neighbor lies strictly inside the
+/// image, so no boundary clamping is needed on any lane.
+fn nms_simd_block(
+    gradient: &GradientMap,
+    out: &mut [f32],
+    w: usize,
+    y: usize,
+    s: usize,
+    row_off: usize,
+) {
+    let magnitude = &gradient.magnitude;
+    let angle = &gradient.angle;
+    let base = y * w;
+    let prev_row = (y - 1) * w;
+    let next_row = (y + 1) * w;
+
+    // Per-lane 0/1 masks selecting which of the 4 bins each lane belongs to.
+    let mut m = [[0.0f32; 8]; 4];
+    let mut mag_arr = [0.0f32; 8];
+    for i in 0..8 {
+        let idx = base + s + i;
+        mag_arr[i] = magnitude[idx];
+        m[nms_bin_index(angle[idx])][i] = 1.0;
+    }
+    let mask0 = f32x8::new(m[0]);
+    let mask1 = f32x8::new(m[1]);
+    let mask2 = f32x8::new(m[2]);
+    let mask3 = f32x8::new(m[3]);
+    let mag = f32x8::new(mag_arr);
+
+    // Direction-selected neighbor windows for each of the 4 bins.
+    //   bin0 (horizontal): a = (x-1, y), b = (x+1, y)
+    //   bin1 (45°):        a = (x+1, y+1), b = (x-1, y-1)
+    //   bin2 (vertical):   a = (x, y-1),   b = (x, y+1)
+    //   bin3 (135°):       a = (x+1, y-1), b = (x-1, y+1)
+    let bin0_na = load8(magnitude, base + s - 1);
+    let bin0_nb = load8(magnitude, base + s + 1);
+    let bin1_na = load8(magnitude, next_row + s + 1);
+    let bin1_nb = load8(magnitude, prev_row + s - 1);
+    let bin2_na = load8(magnitude, prev_row + s);
+    let bin2_nb = load8(magnitude, next_row + s);
+    let bin3_na = load8(magnitude, prev_row + s + 1);
+    let bin3_nb = load8(magnitude, next_row + s - 1);
+
+    // SIMD select across the four bins via the per-lane masks.
+    let na = bin0_na * mask0 + bin1_na * mask1 + bin2_na * mask2 + bin3_na * mask3;
+    let nb = bin0_nb * mask0 + bin1_nb * mask1 + bin2_nb * mask2 + bin3_nb * mask3;
+
+    // Asymmetric compare, identical semantics to the scalar kernel.
+    let keep = mag.cmp_gt(na) & mag.cmp_ge(nb);
+    let res = keep.blend(mag, f32x8::ZERO);
+    let res_arr: [f32; 8] = res.into();
+    for i in 0..8 {
+        out[row_off + s + i] = res_arr[i];
+    }
+}
+
+/// SIMD-accelerated Non-Maximum Suppression (§4.10).
+///
+/// Rayon row-band-sharded, with SIMD (`wide::f32x8`) processing 8 interior
+/// pixels per iteration. Boundary rows (top/bottom) and the column blocks
+/// touching the left/right image edge, plus the non-multiple-of-8 tail, fall
+/// back to the exact scalar kernel — so the output is bit-identical to the
+/// Phase 2 reference. Differentially tested in `tests/simd_nms_tests.rs`.
+pub fn non_max_suppress_simd(gradient: &GradientMap) -> Vec<f32> {
+    let w = gradient.width as usize;
+    let h = gradient.height as usize;
+    let wi = w as i32;
+    let hi = h as i32;
+    let mut out = vec![0.0f32; gradient.magnitude.len()];
+    let band_px = BAND_ROWS * w;
+
+    out.par_chunks_mut(band_px)
+        .enumerate()
+        .for_each(|(band_idx, band)| {
+            let row_start = band_idx * BAND_ROWS;
+            let row_end = (row_start + BAND_ROWS).min(h);
+            for y in row_start..row_end {
+                let row_off = (y - row_start) * w;
+
+                if y < 1 || y + 1 >= h {
+                    // Boundary row: neighbors reach outside the image, so clamp
+                    // via the scalar path for the whole row.
+                    for x in 0..w {
+                        nms_scalar_pixel(gradient, wi, hi, x as i32, y as i32, band, row_off);
+                    }
+                    continue;
+                }
+
+                // Interior row: column 0 always needs left-edge clamping.
+                nms_scalar_pixel(gradient, wi, hi, 0, y as i32, band, row_off);
+
+                // SIMD blocks while the block + its neighbors stay interior.
+                let mut s = 1usize;
+                while s + 8 <= w - 1 {
+                    nms_simd_block(gradient, band, w, y, s, row_off);
+                    s += 8;
+                }
+
+                // Scalar tail (right edge + non-multiple-of-8 remainder).
+                while s < w {
+                    nms_scalar_pixel(gradient, wi, hi, s as i32, y as i32, band, row_off);
+                    s += 1;
                 }
             }
         });
