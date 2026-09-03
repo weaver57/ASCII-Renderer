@@ -3,8 +3,6 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use super::yuv::{ColorRange, ColorSpace};
-
 /// Output format from the FFmpeg subprocess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -191,6 +189,25 @@ impl FFmpegDecoder {
     /// Estimate PTS for the current frame based on frame count and avg_fps.
     fn estimate_pts(&self) -> f64 {
         self.frame_count as f64 / self.avg_fps
+    }
+}
+
+/// Video frame decoder trait implemented by `FFmpegDecoder` and mock test decoders.
+pub trait VideoDecoder {
+    /// Read the next frame. Returns `Ok(Some(frame))` on success, `Ok(None)` on EOF.
+    fn read_frame(&mut self) -> Result<Option<DecodedFrame>>;
+
+    /// Returns average frame rate (FPS) of the video source.
+    fn avg_fps(&self) -> f64;
+}
+
+impl VideoDecoder for FFmpegDecoder {
+    fn read_frame(&mut self) -> Result<Option<DecodedFrame>> {
+        self.read_frame()
+    }
+
+    fn avg_fps(&self) -> f64 {
+        self.avg_fps()
     }
 }
 

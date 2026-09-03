@@ -1,5 +1,4 @@
-use crate::render::edge::{EdgeCellInfo, circular_lerp_deg};
-use std::collections::VecDeque;
+use crate::render::edge::{circular_lerp_deg, EdgeCellInfo};
 
 /// Smooths per-cell edge state across consecutive frames using an exponential
 /// moving average on magnitude and circular interpolation on orientation.

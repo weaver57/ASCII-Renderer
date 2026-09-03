@@ -21,5 +21,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 ctrlc = "3"
 supports-color = "3"
 libc = "0.2"
+crossbeam-channel = "0.5"
+rayon = "1"
+wide = "0.7"
 
 [dev-dependencies]
+
+[profile.profiling]
+inherits = "release"
+debug = true

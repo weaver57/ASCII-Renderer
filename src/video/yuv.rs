@@ -41,7 +41,7 @@ pub struct YuvFrame {
 /// SIMD-friendly alignment boundary, which is usually *larger* than the actual
 /// pixel width. Every downstream algorithm (Sobel, NMS, box filter) assumes
 /// `row_pitch == width`, so we strip the padding here at the boundary.
-fn destride_plane(src: &[u8], src_stride: usize, width: usize, height: usize, dst: &mut [u8]) {
+pub fn destride_plane(src: &[u8], src_stride: usize, width: usize, height: usize, dst: &mut [u8]) {
     debug_assert_eq!(dst.len(), width * height);
     for row in 0..height {
         let src_start = row * src_stride;
@@ -126,24 +126,21 @@ pub fn build_luma_map_y(y_plane: &[u8], dst: &mut Vec<f32>) {
     dst.extend(y_plane.iter().map(|&v| v as f32));
 }
 
-/// Downsample a YUV420P frame to per-cell (luma, RGB color).
-///
-/// For each character cell:
-/// 1. Box-filter average Y over the luma-space source rect → cell luma.
-/// 2. Box-filter average U, V over the corresponding chroma-space rect (half res).
-/// 3. Convert the single averaged (Y, U, V) triple to RGB — once per cell.
-///
-/// This defers chroma→RGB conversion to after per-cell averaging (D4), yielding
-/// a ~778× reduction in color-space conversions at 1080p→160×90 grid.
-pub fn downsample_yuv(
-    frame: &YuvFrame,
+/// Downsample raw Y, U, V plane slices directly into pre-allocated per-cell luma & color buffers.
+pub fn downsample_yuv_planes(
+    y_plane: &[u8],
+    u_plane: &[u8],
+    v_plane: &[u8],
+    src_w: usize,
+    src_h: usize,
+    color_space: ColorSpace,
     cols: usize,
     rows: usize,
-) -> (Vec<f32>, Vec<(u8, u8, u8)>) {
-    let src_w = frame.width as usize;
-    let src_h = frame.height as usize;
-    let mut cell_luma = vec![0.0f32; cols * rows];
-    let mut cell_color = vec![(0u8, 0u8, 0u8); cols * rows];
+    cell_luma: &mut [f32],
+    cell_color: &mut [(u8, u8, u8)],
+) {
+    debug_assert!(cell_luma.len() >= cols * rows);
+    debug_assert!(cell_color.len() >= cols * rows);
 
     for row in 0..rows {
         for col in 0..cols {
@@ -164,7 +161,7 @@ pub fn downsample_yuv(
             let mut y_count = 0u32;
             for py in y0..y1 {
                 for px in x0..x1 {
-                    y_acc += frame.y[py * src_w + px] as f32;
+                    y_acc += y_plane[py * src_w + px] as f32;
                     y_count += 1;
                 }
             }
@@ -181,8 +178,8 @@ pub fn downsample_yuv(
             let mut c_count = 0u32;
             for py in cy0..cy1.min(src_h / 2) {
                 for px in cx0..cx1.min(src_w / 2) {
-                    u_acc += frame.u[py * chroma_src_w + px] as f32;
-                    v_acc += frame.v[py * chroma_src_w + px] as f32;
+                    u_acc += u_plane[py * chroma_src_w + px] as f32;
+                    v_acc += v_plane[py * chroma_src_w + px] as f32;
                     c_count += 1;
                 }
             }
@@ -194,10 +191,39 @@ pub fn downsample_yuv(
 
             let idx = row * cols + col;
             cell_luma[idx] = avg_y;
-            cell_color[idx] = yuv_to_rgb(avg_y, avg_u, avg_v, frame.color_space);
+            cell_color[idx] = yuv_to_rgb(avg_y, avg_u, avg_v, color_space);
         }
     }
+}
 
+/// Downsample a YUV420P frame to per-cell (luma, RGB color).
+///
+/// For each character cell:
+/// 1. Box-filter average Y over the luma-space source rect → cell luma.
+/// 2. Box-filter average U, V over the corresponding chroma-space rect (half res).
+/// 3. Convert the single averaged (Y, U, V) triple to RGB — once per cell.
+///
+/// This defers chroma→RGB conversion to after per-cell averaging (D4), yielding
+/// a ~778× reduction in color-space conversions at 1080p→160×90 grid.
+pub fn downsample_yuv(
+    frame: &YuvFrame,
+    cols: usize,
+    rows: usize,
+) -> (Vec<f32>, Vec<(u8, u8, u8)>) {
+    let mut cell_luma = vec![0.0f32; cols * rows];
+    let mut cell_color = vec![(0u8, 0u8, 0u8); cols * rows];
+    downsample_yuv_planes(
+        &frame.y,
+        &frame.u,
+        &frame.v,
+        frame.width as usize,
+        frame.height as usize,
+        frame.color_space,
+        cols,
+        rows,
+        &mut cell_luma,
+        &mut cell_color,
+    );
     (cell_luma, cell_color)
 }
 

@@ -14,14 +14,13 @@ use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use render::{
     AsciiRenderer, ColorMode as RenderColorMode, BLOCK_RAMP, DETAILED_RAMP, RAMP, SHORT_RAMP,
     compute_frame_edges,
 };
 use terminal::TerminalGuard;
-use video::FFmpegDecoder;
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorChoice {
@@ -466,7 +465,7 @@ fn main() -> Result<()> {
     });
 
     let char_aspect = terminal_size::get_char_aspect();
-    let (mut width, mut height) = image_loader::compute_image_grid_dimensions(
+    let (width, height) = image_loader::compute_image_grid_dimensions(
         src_w,
         src_h,
         args.width,

@@ -8,3 +8,6 @@ pub mod caps;
 pub mod diff;
 pub mod dither;
 pub mod palette;
+pub mod pool;
+pub mod pipeline;
+pub mod parallel;

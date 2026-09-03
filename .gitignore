@@ -3,3 +3,9 @@
 # Generated test media
 test_circle.png
 test_video.mp4
+
+# Local test media (not for version control)
+*.mp4
+*.jpg
+*.jpeg
+*.png
